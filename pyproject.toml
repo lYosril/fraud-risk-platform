@@ -1,0 +1,141 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fraud-risk-platform"
+version = "0.1.0"
+description = "End-to-end credit card fraud detection, explainability, serving and risk-monitoring platform."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["fraud-detection", "machine-learning", "risk", "mlops", "explainability"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+# Runtime dependencies are declared as compatible-release ranges rather than exact pins, so
+# `pip install -e .` resolves a mutually compatible, currently-supported set. Everything the
+# serving path imports at request time must live here, not in an extra: the rationale per
+# package, and the "one image, several commands" decision behind it, are in
+# docs/ARCHITECTURE.md §14. Adopting a lock file is tracked in docs/ROADMAP.md.
+dependencies = [
+  # Core data / ML
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<3",
+  "scikit-learn>=1.5,<2",
+  "xgboost>=2.1,<4",
+  "shap>=0.46,<1",
+  "joblib>=1.4,<2",
+  # Experiment tracking
+  "mlflow>=2.16,<4",
+  # Configuration + API
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5,<3",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32,<1",
+  # Persistence
+  "sqlalchemy>=2.0.35,<3",
+  "alembic>=1.13,<2",
+  "psycopg[binary]>=3.2,<4",
+  # Dashboard
+  "streamlit>=1.39,<2",
+  "plotly>=5.24,<7",
+]
+
+[project.optional-dependencies]
+# Rich drift reports. The drift *decision* metrics live in our own code (ARCHITECTURE D8);
+# Evidently is optional so the monitoring core stays light and testable.
+monitoring = ["evidently>=0.6,<1"]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "httpx>=0.27,<1",
+  "ruff>=0.7,<1",
+  "mypy>=1.13,<3",
+  # Used directly by tests/test_smoke_imports.py to check installed versions against the
+  # ranges declared above. Declared rather than relied on as a transitive dependency.
+  "packaging>=24,<27",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fraud_risk"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # import sorting
+  "N",   # naming conventions
+  "UP",  # pyupgrade
+  "B",   # bugbear
+  "C4",  # comprehensions
+  "SIM", # simplify
+  "RUF", # ruff-specific
+  "S",   # bandit-style security checks
+  "T20", # no print statements
+  "PTH", # prefer pathlib
+  "DTZ", # timezone-aware datetimes
+  "ANN", # require type annotations
+]
+ignore = [
+  "ANN401", # dynamically typed **kwargs is acceptable at explicit boundaries
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S101"]
+"src/fraud_risk/dashboard/**" = ["T20"] # Streamlit UIs legitimately print to the console
+
+[tool.ruff.lint.isort]
+known-first-party = ["fraud_risk"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+# Mirrors pytest's `pythonpath` so `import fraud_risk` resolves from the src layout.
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+
+# Third-party packages that do not ship type information. Listed explicitly so that
+# `strict` stays meaningful for our own code instead of being disabled globally.
+[[tool.mypy.overrides]]
+module = ["xgboost.*", "shap.*", "mlflow.*", "evidently.*", "plotly.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "slow: tests that take more than a couple of seconds",
+  "integration: tests that require PostgreSQL, the API, or a model artifact",
+]
+
+[tool.coverage.run]
+source = ["src/fraud_risk"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]

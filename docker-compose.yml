@@ -1,0 +1,41 @@
+# Local development infrastructure.
+#
+# Scope is intentionally limited to PostgreSQL at this stage. The api / dashboard /
+# trainer services are added in milestone M9, together with the Dockerfile that backs
+# them: a service definition is not committed before the image it references exists.
+# See docs/ROADMAP.md.
+#
+# Usage:
+#   docker compose up -d postgres
+#   docker compose logs -f postgres
+#   docker compose down            # keeps the named volume
+#   docker compose down -v         # deletes the local database volume
+#
+# Values come from `.env` when present, otherwise from the safe local defaults below.
+
+name: fraud-risk-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud-risk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fraud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-fraud}
+    ports:
+      # Bound to localhost only: this database holds local development data.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fraud} -d ${POSTGRES_DB:-fraud}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:
+    name: fraud-risk-postgres-data

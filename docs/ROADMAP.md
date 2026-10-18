@@ -1,0 +1,244 @@
+# Implementation Roadmap
+
+Milestones are ordered so that each one is independently demonstrable and no milestone
+depends on an unfinished later one. **M0 is complete. M1–M9 are not started.**
+
+Test each milestone's exit criteria before starting the next one. No milestone is "done"
+because code exists — it is done when its exit criteria pass and the evidence is recorded.
+
+---
+
+## M0 — Repository foundation ✅ *complete*
+
+**Deliverables**
+
+- Repository skeleton, `src/fraud_risk/` package with documented module boundaries.
+- `pyproject.toml` (dependencies, extras, ruff/mypy/pytest/coverage config).
+- `.gitignore`, `.gitattributes`, `.env.example`, `.python-version`.
+- `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `README.md`, `AGENTS.md`.
+- `docker-compose.yml` (PostgreSQL only), `.github/workflows/ci.yml`.
+- `fraud_risk.config.Settings` and a small `tests/` suite covering it.
+- Provisioned Python 3.11 environment (documented for PowerShell and Bash) and
+  `tests/test_smoke_imports.py`, which checks the architecture's packages are declared,
+  installed inside their declared ranges, and importable.
+
+**Exit criteria**
+
+- [x] `python -m compileall src tests` succeeds.
+- [x] `ruff format --check .` and `ruff check .` report no findings.
+- [x] `mypy` reports `Success` under `strict = true`.
+- [x] `pytest -q` passes (`34 passed` on both Windows 3.11.9 and Linux 3.11.17).
+- [x] The declared dependency set resolves and the editable build works
+      (`pip install --dry-run -e ".[dev]"`, then installed: 130 packages, exit 0).
+- [x] `.gitignore` behaviour verified: `.venv/`, `.env`, `mlruns/`, `data/raw/*` and
+      `artifacts/*` are ignored while the `.gitkeep` placeholders are tracked.
+- [x] The documented light setup path works (`9 passed, 25 deselected` with only
+      `pydantic-settings packaging pytest ruff mypy` installed).
+- [ ] CI workflow executed at least once on GitHub — *not run yet; the workflow file has
+      never been pushed.*
+
+---
+
+## M1 — Data ingestion and validation
+
+**Deliverables**
+
+- Decide the dataset (ARCHITECTURE §13.1) and write its data card.
+- `data.ingestion`: load raw files from `data/raw/` into a typed `DataFrame`, dataset
+  fingerprint (hash + row count + time range).
+- `data.validation`: declarative schema (dtypes, ranges, nullability, allowed values),
+  plus explicit leakage guards (`is_fraud` must not reach the inference path).
+- CLI entry point, e.g. `python -m fraud_risk.data.validate --input data/raw/<file>`.
+- Unit tests for every validation rule, including the failure cases.
+
+**Exit criteria**
+
+- Validating a known-good fixture passes; a corrupted fixture fails with an actionable message.
+- The validation report is written to a git-ignored location and is reproducible from the hash.
+
+**Depends on:** M0.
+
+---
+
+## M2 — Persistence layer
+
+**Deliverables**
+
+- `db.base` (`DeclarativeBase` + naming convention for constraints), `db.models`
+  (`predictions`, `feedback_labels`, `drift_reports`), `db.session` (engine + session factory).
+- Alembic initialised; first migration creating the three tables, plus a downgrade path.
+- Repository functions for the write/read paths the API actually needs (no premature DAO layer).
+
+**Exit criteria**
+
+- `alembic upgrade head` against the Compose PostgreSQL creates the schema; `downgrade base`
+  removes it cleanly.
+- Round-trip test: insert a prediction row, read it back with JSONB fields intact.
+- Verified against PostgreSQL, not SQLite.
+
+**Depends on:** M0.
+
+---
+
+## M3 — Exploratory analysis and feature engineering
+
+**Deliverables**
+
+- Notebooks under `notebooks/` (committed *without* dataset outputs) covering class balance,
+  amount/time distributions, and early precision/recall expectations.
+- `features.engineering`: one reusable `ColumnTransformer` producing the model matrix.
+- Leakage controls that are unit-tested, not just documented.
+- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3).
+
+**Exit criteria**
+
+- The transform is fitted once and applied identically in a second process, producing
+  identical output for identical input (train/serve skew test).
+- Notebooks run top-to-bottom from a clean kernel without manual steps.
+
+**Depends on:** M1.
+
+---
+
+## M4 — Model training and evaluation
+
+**Deliverables**
+
+- `models.training`: temporal split, stratified CV, class-imbalance handling, candidate
+  comparison (logistic-regression baseline, random forest, XGBoost), probability calibration.
+- `models.evaluation`: PR-AUC first, recall/precision at operating points, ROC-AUC,
+  calibration curve, confusion matrix at the tuned thresholds, business-cost sweep,
+  error analysis.
+- MLflow logging of params, metrics, artifacts, dataset fingerprint, git revision, and the
+  split definition.
+
+**Exit criteria**
+
+- At least two real runs are visible in the MLflow UI with comparable metrics.
+- Reported metrics come from actual runs; the run id is recorded next to every number.
+- The threshold policy (ARCHITECTURE §6) is tuned on validation data and frozen with the model.
+
+**Depends on:** M2 (for the MLflow/Postgres option) and M3.
+
+---
+
+## M5 — Artifact management and inference
+
+**Deliverables**
+
+- Artifact bundle format: fitted transformer + calibrated model + metadata (schema version,
+  feature names, thresholds, metrics, git revision, training timestamp).
+- `models.registry`: publish a bundle, resolve a named alias (`champion`), list versions.
+  MLflow registry aliases back this, with a filesystem store for the local PoC.
+- `models.inference`: lazy load + cache, `predict_one`, and SHAP explanations (§7).
+- Documented promotion gate (ARCHITECTURE §13.3).
+
+**Exit criteria**
+
+- Loading a bundle by alias and scoring a fixture transaction returns a calibrated score.
+- Loading a *missing* bundle raises a clear error the API can turn into a 503.
+- Explanations are produced for a single transaction well within an interactive latency budget.
+
+**Depends on:** M4.
+
+---
+
+## M6 — FastAPI application
+
+**Deliverables**
+
+- `api.main`: app factory, lifespan (load model once, dispose the engine on shutdown),
+  structured logging with request ids.
+- `api.schemas`: Pydantic v2 request/response models mirroring the §5.2 contract; validation
+  rejects label fields.
+- Routes: `GET /health` (process + model availability, reported separately), `POST /predict`,
+  `GET /predictions/{id}`, `POST /feedback`.
+- Persistence of every prediction; documented, non-leaking error responses.
+- Resolve the inherited `starlette.testclient` / `httpx` deprecation first:
+  `fastapi.testclient` currently warns *"Using `httpx` with `starlette.testclient` is
+  deprecated; install `httpx2` instead"*. Decide and pin before writing the API integration
+  tests, rather than discovering it halfway through them.
+
+**Exit criteria**
+
+- Integration tests run clean, with no `httpx`/`httpx2` deprecation warning.
+
+- `uvicorn` serves the OpenAPI docs; every endpoint has a documented success and failure case.
+- Integration tests via `httpx.ASGITransport` cover happy path, validation failure, unknown id,
+  and the no-model-loaded path.
+- A scored transaction is readable back from PostgreSQL and matches the response body.
+
+**Depends on:** M5, M2.
+
+---
+
+## M7 — Streamlit dashboard
+
+**Deliverables**
+
+- `dashboard.app` reading from the API/DB (never importing model internals).
+- Views: traffic over time, score distribution with threshold markers, decision mix,
+  review-queue table, per-prediction explanation drill-down, drift history.
+- Plotly charts; API base URL from settings.
+
+**Exit criteria**
+
+- Runs with `streamlit run` against a locally seeded database and shows real stored rows.
+- No hardcoded connection strings; the dashboard starts (with a clear message) when the API
+  is unreachable.
+
+**Depends on:** M6 (seeded data).
+
+---
+
+## M8 — Monitoring
+
+**Deliverables**
+
+- `monitoring.drift`: PSI (per feature, reference = training distribution), KS statistic,
+  score-distribution shift, volume/decision-mix tracking, and delayed-label performance.
+- Persist each run to `drift_reports`; configurable warning/alert thresholds.
+- Optional Evidently HTML report via the `monitoring` extra.
+- A documented runbook: what each alert means and what to check first.
+
+**Exit criteria**
+
+- Unit tests with hand-constructed distributions where the expected PSI is known analytically.
+- Injecting a shifted dataset produces a breach that is visible in `drift_reports` and in the
+  dashboard; injecting an unshifted one does not.
+- Thresholds are version-controlled, not hardcoded in the analysis script.
+
+**Depends on:** M6, M7.
+
+---
+
+## M9 — CI/CD and containerised deployment
+
+**Deliverables**
+
+- Multi-stage `Dockerfile` (one image, several commands) and application services in
+  `docker-compose.yml` (api, dashboard, optional mlflow, postgres).
+- CI: lint → type-check → unit tests → integration tests against a PostgreSQL service
+  container → build image. Coverage reported, not used as a gate until it is meaningful.
+- Deployment notes (reverse proxy, secrets injection, migration step on release).
+
+**Exit criteria**
+
+- `docker compose up --build` brings up a working stack from a clean clone (README-documented).
+- CI is green on a real commit — not just locally.
+- Secrets come from the environment at runtime; the image contains none.
+
+**Depends on:** M6, M7, M8.
+
+---
+
+## Backlog (explicitly not scheduled)
+
+- Adopt a lock file (for example `uv.lock` or a `pip-compile`d constraints file) so CI and
+  production resolve byte-identical dependency versions.
+- API authentication / API keys (ARCHITECTURE §13.5).
+- Model card per promoted version.
+- Batch scoring endpoint.
+- Automatic drift-triggered retraining (only after M8 has historical evidence).
+- Streaming ingestion.
+- Kubernetes manifests / cloud IaC.

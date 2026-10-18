@@ -1,0 +1,96 @@
+# ---- Secrets and environment ------------------------------------------------
+# Real configuration lives in .env, which is never committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+.streamlit/secrets.toml
+credentials.json
+
+# ---- Virtual environments ---------------------------------------------------
+# Anchored: a bare `env/` or `venv/` pattern would also hide a source package of that name.
+/.venv/
+/venv/
+/ENV/
+/env/
+/.conda/
+.python-version.bak
+
+# ---- Python build / cache artifacts -----------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+.installed.cfg
+
+# ---- Tooling caches --------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+coverage-html/
+junit.xml
+.hypothesis/
+
+# ---- Notebooks --------------------------------------------------------------
+.ipynb_checkpoints/
+notebooks/**/*.html
+
+# ---- Datasets ---------------------------------------------------------------
+# Raw, interim and processed data never enter version control.
+# Weight: never commit real (or realistically-shaped) transaction data.
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+# Committed fixtures live in data/sample/ and must be tiny, synthetic or public-sample only.
+
+# ---- Model artifacts --------------------------------------------------------
+# `artifacts/` is the single artifact store. Deliberately NOT a bare `models/` pattern:
+# that would also ignore the `src/fraud_risk/models/` source package.
+artifacts/*
+!artifacts/.gitkeep
+mlruns/
+mlartifacts/
+*.pkl
+*.joblib
+*.onnx
+*.ubj
+*.model
+*.parquet
+*.feather
+*.h5
+
+# ---- Local database volumes and files --------------------------------------
+.pgdata/
+pgdata/
+postgres-data/
+*.sqlite3
+*.sqlite3-journal
+mlflow.db
+
+# ---- Logs -------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+
+# ---- Editors and OS --------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

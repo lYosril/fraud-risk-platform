@@ -1,0 +1,32 @@
+# Normalise text files to LF in the repository; check out native line endings.
+# Python, YAML and shell sources must never contain CRLF, and mixed line endings
+# in a single file are the single most common source of spurious diffs.
+* text=auto
+
+*.py    text eol=lf
+*.pyi   text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.sql   text eol=lf
+*.ipynb text eol=lf
+
+# Windows-native scripts keep CRLF so they run in PowerShell / cmd.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary-ish assets that must never be line-ending converted.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.joblib binary
+*.pkl  binary

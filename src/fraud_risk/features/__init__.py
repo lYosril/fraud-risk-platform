@@ -5,5 +5,6 @@ Responsibility
     feature transformer that training and serving share.
 
 Status
-    Scaffolding only. See ``docs/ROADMAP.md`` (M3).
+    EDA and the shared transform are implemented; serialisation into the artifact bundle is
+    pending. See ``docs/ROADMAP.md`` (M3).
 """

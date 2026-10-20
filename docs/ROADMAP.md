@@ -1,7 +1,8 @@
 # Implementation Roadmap
 
 Milestones are ordered so that each one is independently demonstrable and no milestone
-depends on an unfinished later one. **M0 is complete. M1–M9 are not started.**
+depends on an unfinished later one. **M0 is complete. M1 is in progress (dataset acquisition
+and data card only); M2–M9 are not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
 because code exists — it is done when its exit criteria pass and the evidence is recorded.
@@ -43,18 +44,30 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 **Deliverables**
 
-- Decide the dataset (ARCHITECTURE §13.1) and write its data card.
-- `data.ingestion`: load raw files from `data/raw/` into a typed `DataFrame`, dataset
-  fingerprint (hash + row count + time range).
-- `data.validation`: declarative schema (dtypes, ranges, nullability, allowed values),
-  plus explicit leakage guards (`is_fraud` must not reach the inference path).
-- CLI entry point, e.g. `python -m fraud_risk.data.validate --input data/raw/<file>`.
-- Unit tests for every validation rule, including the failure cases.
+- **Dataset decided and documented** (ARCHITECTURE §13.1 resolved): data card in
+  `docs/DATA_CARD.md`, operator workflow in `data/README.md`, and
+  `python -m fraud_risk.data` for presence, header, column and row-width checking.
+- `data.ingestion` — **loading done**: `load_csv` returns the file as stored (no coercion,
+  no cleaning) and raises typed errors for missing, empty, non-UTF-8, duplicate-header and
+  ragged files. The dataset fingerprint (hash + row count + time range) is still pending.
+- `data.validation` — **contract done**: required columns, duplicate column names, empty
+  data, per-column null counts, numeric/finite non-target columns, and `Class` restricted
+  to `0`/`1`, plus a report of row/feature/missing/duplicate/class counts and proportions.
+  Typed errors live in `data.errors`. Value-range checks are not implemented yet, and the
+  inference-side leakage guard (`is_fraud` must not reach the inference path) is still
+  pending (M6).
+- CLI entry point — **done**: `python -m fraud_risk.data` now runs the contract check after
+  the presence/shape check, so a failure is reproducible from the command line.
+- **Unit tests done** for every rule above, including the failure cases
+  (`tests/test_ingestion.py`, `tests/test_validation.py`).
 
 **Exit criteria**
 
 - Validating a known-good fixture passes; a corrupted fixture fails with an actionable message.
+  *Met: the tracked fixture validates with exit 0; corrupt fixtures exit 1 with a typed error
+  naming the column and reason.*
 - The validation report is written to a git-ignored location and is reproducible from the hash.
+  *Not met: the report is printed, not persisted, and the fingerprint is not implemented.*
 
 **Depends on:** M0.
 
@@ -84,17 +97,35 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 **Deliverables**
 
-- Notebooks under `notebooks/` (committed *without* dataset outputs) covering class balance,
-  amount/time distributions, and early precision/recall expectations.
-- `features.engineering`: one reusable `ColumnTransformer` producing the model matrix.
-- Leakage controls that are unit-tested, not just documented.
-- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3).
+- EDA — **done**: `notebooks/eda.py` loads the file through the ingestion/validation layer,
+  takes every number from `features.eda`, and writes `summary.md`, `summary.json`, four CSV
+  tables and six figures to the git-ignored `reports/eda/`. A script rather than a notebook so
+  the tests execute it end to end. It covers shape/schema, duplicates, missing values, class
+  balance, `Amount`, `Time`, per-feature statistics, feature/target associations, and the
+  limitations and leakage risks. A non-reference input is labelled synthetic or custom in every
+  artefact. No transform is fitted at this stage.
+- `features.engineering`: one reusable `ColumnTransformer` producing the model matrix —
+  **done**: `V1..V28` + `Amount`, `Time` and `Class` excluded with the reasons in the schema,
+  raw values for tree models and a training-fitted `StandardScaler` for linear ones.
+- Leakage controls that are unit-tested, not just documented — **done** for the split and the
+  transform: disjointness, timestamp-boundary integrity, label separation, and training-only
+  fitting statistics.
+- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3) —
+  **pending**, delivered with the artifact registry in M5.
+- Early precision/recall expectations move to M4: they require a trained, calibrated model,
+  and no number may be invented before one exists.
 
 **Exit criteria**
 
 - The transform is fitted once and applied identically in a second process, producing
   identical output for identical input (train/serve skew test).
-- Notebooks run top-to-bottom from a clean kernel without manual steps.
+  *Partially met: fitted on training rows only and reused unchanged for validation, with the
+  training-only statistics unit-tested. Cross-process identity awaits joblib serialisation
+  (M5).*
+- The EDA run is reproducible from a clean install: `python notebooks/eda.py` regenerates
+  every artefact from the input file and labels a non-reference input as synthetic or custom.
+  *Met for both the tracked fixture and the local reference file; reproducible from the
+  file, not from a persisted hash (the dataset fingerprint is still an M1 item).*
 
 **Depends on:** M1.
 
@@ -104,8 +135,12 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 **Deliverables**
 
-- `models.training`: temporal split, stratified CV, class-imbalance handling, candidate
-  comparison (logistic-regression baseline, random forest, XGBoost), probability calibration.
+- `models.splitting` — **done** (delivered with the preprocessing stage): temporal 60/20/20
+  split (default for the time-ordered file, boundaries pushed to the next distinct second) and
+  a seed-reproducible stratified alternative, plus a ~2.5 KB split record with no row-level
+  values.
+- `models.training`: stratified CV, class-imbalance handling, candidate comparison
+  (logistic-regression baseline, random forest, XGBoost), probability calibration.
 - `models.evaluation`: PR-AUC first, recall/precision at operating points, ROC-AUC,
   calibration curve, confusion matrix at the tuned thresholds, business-cost sweep,
   error analysis.

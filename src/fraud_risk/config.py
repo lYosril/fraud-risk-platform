@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "./mlruns"
     mlflow_experiment_name: str = "fraud-detection"
 
+    # -- Reproducibility -----------------------------------------------------
+    # Seed for every randomised step (splits, CV folds, estimator initialisation). It is
+    # configuration rather than a constant in a training script so that runs can be compared
+    # and reproduced without editing code. ``sklearn`` accepts seeds in [0, 2**32).
+    random_seed: int = Field(default=42, ge=0, le=2**32 - 1)
+
     # -- Model artifacts -----------------------------------------------------
     model_name: str = "fraud-risk-classifier"
     # Registry alias resolved at inference time; promoted deliberately (never automatically).

@@ -60,6 +60,13 @@ dev = [
   # Used directly by tests/test_smoke_imports.py to check installed versions against the
   # ranges declared above. Declared rather than relied on as a transitive dependency.
   "packaging>=24,<27",
+  # pandas ships no inline types. Without stubs, `mypy --strict` turns every DataFrame in
+  # the data layer into `Any`, which would make the type annotations on those modules
+  # decorative. Dev-only: it is never imported at runtime.
+  "pandas-stubs>=2.2,<3",
+  # Rendering for notebooks/eda.py only. Dev-only on purpose: no module under src/ may import
+  # a plotting library (AGENTS.md §2), so the serving path does not need it.
+  "matplotlib>=3.8,<4",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -112,8 +119,10 @@ pretty = true
 
 # Third-party packages that do not ship type information. Listed explicitly so that
 # `strict` stays meaningful for our own code instead of being disabled globally.
+# scikit-learn ships no `py.typed` marker (checked at 1.9.1), so its estimators are `Any`
+# here; the preprocessing and split tests assert behaviour, not inferred types.
 [[tool.mypy.overrides]]
-module = ["xgboost.*", "shap.*", "mlflow.*", "evidently.*", "plotly.*"]
+module = ["xgboost.*", "shap.*", "mlflow.*", "evidently.*", "plotly.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

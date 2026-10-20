@@ -57,6 +57,10 @@ data/processed/*
 data/external/*
 !data/**/.gitkeep
 # Committed fixtures live in data/sample/ and must be tiny, synthetic or public-sample only.
+# The published dataset must never be committed, wherever an operator drops it. The tracked
+# fixture is deliberately named `creditcard.synthetic.csv`, so it is not caught by these.
+creditcard.csv
+creditcard.zip
 
 # ---- Model artifacts --------------------------------------------------------
 # `artifacts/` is the single artifact store. Deliberately NOT a bare `models/` pattern:
@@ -81,6 +85,10 @@ postgres-data/
 *.sqlite3
 *.sqlite3-journal
 mlflow.db
+
+# ---- Generated reports ------------------------------------------------------
+# EDA and monitoring outputs are regenerated from code; never commit them.
+reports/
 
 # ---- Logs -------------------------------------------------------------------
 logs/

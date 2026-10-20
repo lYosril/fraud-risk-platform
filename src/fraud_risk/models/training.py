@@ -14,5 +14,6 @@ Rules
     - This module never loads model artifacts; that is ``models.registry``.
 
 Status
-    Scaffolding only. See ``docs/ROADMAP.md`` (M4).
+    Scaffolding only. The split lives in ``models.splitting``; this module consumes it. See
+    ``docs/ROADMAP.md`` (M4).
 """

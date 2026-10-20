@@ -51,6 +51,7 @@ CONFIG_ENV_VARS = (
     "MODEL_NAME",
     "MODEL_ALIAS",
     "MODEL_DIR",
+    "RANDOM_SEED",
     "REVIEW_THRESHOLD",
     "BLOCK_THRESHOLD",
     "PERSIST_FEATURE_SNAPSHOT",
@@ -131,6 +132,16 @@ def test_default_api_binding_and_prefix(load_settings: Callable[..., Settings]) 
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert settings.api_prefix == "/api/v1"
+
+
+def test_random_seed_defaults_and_is_bounded(load_settings: Callable[..., Settings]) -> None:
+    """A run is reproducible by default, and an unusable seed fails at startup."""
+    assert load_settings().random_seed == 42
+
+    with pytest.raises(ValidationError):
+        load_settings(random_seed=-1)
+    with pytest.raises(ValidationError):
+        load_settings(random_seed=2**32)
 
 
 def test_required_settings_are_all_present(load_settings: Callable[..., Settings]) -> None:

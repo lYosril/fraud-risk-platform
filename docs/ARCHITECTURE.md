@@ -68,9 +68,9 @@ code in `src/fraud_risk/`, so training/serving skew is a bug, not a design assum
 
 | # | Area | Package / path | Responsibility | Status |
 |---|------|----------------|----------------|--------|
-| 1 | Data ingestion & validation | `src/fraud_risk/data/` | Load raw files from approved local paths; enforce schema, dtypes, ranges, nullability; block leakage columns; emit a validation report. | Scaffolded |
-| 2 | EDA & feature engineering | `src/fraud_risk/features/` | Offline analysis notebooks + reusable, unit-tested transformers (a single `ColumnTransformer` used by training *and* inference). | Scaffolded |
-| 3 | Training & evaluation | `src/fraud_risk/models/training.py`, `evaluation.py` | Cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost analysis. | Scaffolded |
+| 1 | Data ingestion & validation | `src/fraud_risk/data/` | Load raw files from approved local paths; enforce schema, dtypes, ranges, nullability; block leakage columns; emit a validation report. | Loading + contract/report implemented; value ranges, fingerprint and inference-side leakage guard pending |
+| 2 | EDA & feature engineering | `src/fraud_risk/features/` | Offline analysis (`features.eda` + `notebooks/eda.py`) + reusable, unit-tested transformers (a single `ColumnTransformer` used by training *and* inference). | EDA and the shared transformer implemented; joblib serialisation pending |
+| 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost analysis. | Splitting implemented; training/evaluation scaffolded |
 | 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | Scaffolded |
 | 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Scaffolded |
 | 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Scaffolded |
@@ -96,15 +96,23 @@ api / dashboard  ->  models.inference  ->  models.registry  ->  features  ->  da
 
 ### Offline (training)
 
-1. `data.ingestion` reads a raw file from `data/raw/` into a `pandas.DataFrame` with a
-   declared schema. Nothing is written back to `data/raw/`.
-2. `data.validation` runs contract checks and raises on violation. Failures are reported,
-   never silently coerced.
-3. `features.engineering` builds the feature matrix via one declarative pipeline.
-4. `models.training` splits the data, fits candidate models, calibrates, and logs every run
+1. `data.ingestion` reads a raw file from `data/raw/` into a `pandas.DataFrame` exactly as
+   stored — no coercion, no cleaning — and refuses files it cannot parse (missing, empty,
+   non-UTF-8, duplicate headers, ragged rows). Nothing is written back to `data/raw/`.
+2. `data.validation` runs contract checks (columns, nullability, numeric/finite values,
+   binary labels) and raises a typed error on violation. Failures are reported, never
+   silently coerced; the summary report is row-free.
+3. `features.eda` summarises the validated frame (dimensions, class balance, `Amount`/`Time`
+   behaviour, per-feature statistics, feature/target associations). `notebooks/eda.py`
+   renders it into the git-ignored `reports/eda/`. This stage fits **nothing**: no scaler,
+   bin edge or quantile it computes is reused downstream.
+4. `features.engineering` builds the feature matrix via one declarative pipeline. It is fitted
+   on training rows only; `models.splitting` decides which rows those are and records the
+   choice (strategy, seed, sizes, class rates, position digests) without storing data.
+5. `models.training` consumes the split, fits candidate models, calibrates, and logs every run
    (params, metrics, artifacts, dataset fingerprint) to MLflow.
-5. `models.evaluation` produces the comparison table, threshold analysis and error analysis.
-6. The chosen run is exported as an artifact bundle and given a registry alias
+6. `models.evaluation` produces the comparison table, threshold analysis and error analysis.
+7. The chosen run is exported as an artifact bundle and given a registry alias
    (`champion`). Promotion is an explicit, reviewed step.
 
 ### Online (inference)
@@ -126,8 +134,12 @@ and drift monitor always describe real traffic.
 
 ### 5.1 Canonical transaction (input)
 
-Reference dataset for development: the public ULB/OpenML credit-card fraud dataset
-(`Time`, `V1..V28`, `Amount`, `Class`). The canonical record is a superset so a more
+Reference dataset for development: the public **ULB credit-card fraud dataset**
+(`creditcard.csv`), distributed on Kaggle as `mlg-ulb/creditcardfraud`. Its columns are
+`Time`, `V1..V28`, `Amount`, `Class`; `Class` is the source target and maps to `is_fraud`
+below. Provenance, licence and limitations are in [`DATA_CARD.md`](DATA_CARD.md), and the
+operator workflow (manual placement or official Kaggle CLI) is in
+[`../data/README.md`](../data/README.md). The canonical record is a superset so a more
 realistic source can be swapped in later without touching the API contract:
 
 | Field | Type | Notes |
@@ -176,7 +188,26 @@ changes. No `create_all()` outside tests.
 
 **Splits.** Temporal first (train on earlier, test on later), stratified k-fold inside
 training. A random split on `Time`-ordered data inflates scores and is treated as a defect.
-The exact split rule is fixed and recorded in the artifact metadata.
+`models.splitting` implements both rules. `temporal` sorts by `Time`, cuts 60/20/20 and pushes
+each boundary to the next distinct timestamp, so rows sharing a second - often near-duplicates
+- cannot straddle two subsets. `stratified` is class-proportional and seed-reproducible; it is
+available for comparison and for genuinely independent data, but it must not produce the
+headline score on this dataset. Fraud is not uniform over the two days, so the chronological
+rule cannot preserve the global class rate; the realised rates are recorded instead of assumed.
+The split record holds the strategy, seed, fractions, sizes, class counts, feature schema and a
+SHA-256 digest of each subset's row positions, and no row-level values. It is written to the
+git-ignored `reports/splits/` and travels with the artifact metadata.
+
+**Features and scaling.** The model sees `V1..V28` and `Amount`. `Time` is deliberately not a
+feature: it counts seconds since the first row of *this file*, so it cannot be computed when
+scoring one transaction, and under the temporal split it would only be asked to extrapolate
+beyond the training range. It remains the split-ordering key and the drift-window key. Tree
+models receive raw values (they are scale-invariant, and SHAP values stay in original units);
+linear and distance-based models get a per-column `StandardScaler` fitted on training rows
+only. No log, power or quantile reshaping is applied until an evaluation justifies it. The
+object returned by `features.engineering.build_preprocessor` is the single transform that
+ships in the bundle (D3); resampling, if ever justified, belongs inside the training pipeline
+after the split and never replaces or reweights validation/test rows.
 
 **Imbalance.** Fraud rates are typically well under 1%. Strategy order:
 `scale_pos_weight` / `class_weight` → threshold tuning → (only if justified) resampling.
@@ -315,9 +346,10 @@ tests are fixed or deleted, never retried.
 
 ## 13. Open questions (to resolve before the milestone that depends on them)
 
-1. **Dataset.** ULB/OpenML credit-card fraud (small, well-understood, PCA-anonymised) vs a
-   larger synthetic source with business-meaningful columns. Affects §7 explainability.
-   *Blocks M1.*
+1. **Dataset.** ✅ **Resolved.** The public ULB credit-card fraud dataset
+   (`creditcard.csv`, Kaggle `mlg-ulb/creditcardfraud`) is selected; source, licence, schema,
+   target mapping and limitations are documented in [`DATA_CARD.md`](DATA_CARD.md). The
+   explainability consequence (PCA-derived features) is recorded in §7.
 2. **Cost function weights** (`cost_fraud`, `cost_review`) and the target precision for the
    review queue. *Blocks M4.*
 3. **Promotion gate.** Minimum PR-AUC / drift criteria required to move an alias to
@@ -350,7 +382,7 @@ boundary: anything the serving path imports at request time must be in `dependen
 | `sqlalchemy`, `alembic`, `psycopg[binary]` | core | Persistence and migrations (D10). |
 | `streamlit`, `plotly` | core | The dashboard command of the same image (§10). |
 | `evidently` | extra `monitoring` | Rich report rendering only. The drift *decision* is first-party so thresholds stay testable and version-controlled (D8). |
-| `pytest`, `pytest-cov`, `httpx`, `ruff`, `mypy`, `packaging` | extra `dev` | Never imported by `src/`. `httpx` is required by FastAPI's `TestClient`; `packaging` is used by the environment smoke test to verify installed versions against the declared ranges. |
+| `pytest`, `pytest-cov`, `httpx`, `ruff`, `mypy`, `packaging`, `pandas-stubs`, `matplotlib` | extra `dev` | Never imported by `src/`. `httpx` is required by FastAPI's `TestClient`; `packaging` is used by the environment smoke test to verify installed versions against the declared ranges. `pandas-stubs` exists because pandas ships no inline types: without it `mypy --strict` treats every `DataFrame` as `Any`, which would make the data layer's annotations decorative. `matplotlib` renders the EDA figures from `notebooks/eda.py`; it stays out of `dependencies` because no module under `src/` may import a plotting library (AGENTS.md §2), which also keeps the serving image free of it. |
 
 **Invariants:** nothing in `dependencies` is used only by an extra; nothing in an extra is
 imported by `src/fraud_risk/`.

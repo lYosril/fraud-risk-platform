@@ -1,7 +1,7 @@
 """ORM models for prediction persistence.
 
 Responsibility
-    Persist the prediction metadata the API and future dashboard need: a UUID, timestamp,
+    Persist the prediction metadata the API and dashboard need: a UUID, timestamp,
     model identity, score, applied threshold, binary decision and analyst review state.
     Raw transaction features are *not* stored unless the operator explicitly enables the
     opt-in snapshot, which is off by default.

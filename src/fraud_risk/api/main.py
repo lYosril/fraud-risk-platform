@@ -53,9 +53,9 @@ logger = logging.getLogger(__name__)
 API_TITLE = "Fraud Detection & Risk Intelligence Platform API"
 API_DESCRIPTION = (
     "Versioned HTTP contract for single and batch transaction scoring, model readiness, "
-    "model metadata, prediction history and analyst review. Health, readiness and scoring are "
-    "public; metadata and review operations require an administrative bearer token. Deploy "
-    "behind TLS and bind to a private interface."
+    "model metadata, prediction history, aggregate history counts and analyst review. Health, "
+    "readiness and scoring are public; metadata, history, summary and review operations require "
+    "an administrative bearer token. Deploy behind TLS and bind to a private interface."
 )
 
 

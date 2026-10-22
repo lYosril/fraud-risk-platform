@@ -28,7 +28,12 @@ from starlette.requests import Request
 from fraud_risk.api.dependencies import get_db_session
 from fraud_risk.config import get_settings
 from fraud_risk.db.models import Prediction, PredictionDecision, ReviewStatus
-from fraud_risk.db.repository import PersistenceError, PredictionCreate, PredictionRepository
+from fraud_risk.db.repository import (
+    InvalidReviewTransitionError,
+    PersistenceError,
+    PredictionCreate,
+    PredictionRepository,
+)
 from fraud_risk.db.session import DB_SESSION_FACTORY_STATE_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +162,7 @@ def test_repository_get_and_review_status_update() -> None:
         risk_score=0.75,
         threshold=0.5,
         decision="fraud",
+        review_status="pending",
     )
     session.get.return_value = record
     repository = PredictionRepository(session)
@@ -183,6 +189,180 @@ def test_repository_review_update_returns_none_when_missing() -> None:
     session.commit.assert_not_called()
 
 
+def test_repository_list_recent_returns_a_bounded_newest_first_page() -> None:
+    session = MagicMock(spec=Session)
+    record = Prediction(
+        prediction_id=uuid4(),
+        transaction_id="txn-list",
+        created_at=datetime.now(UTC),
+        model_version="model-v1",
+        model_sha256="a" * 64,
+        risk_score=0.75,
+        threshold=0.5,
+        decision="fraud",
+        review_status="pending",
+    )
+    session.scalars.return_value.all.return_value = [record]
+    repository = PredictionRepository(session)
+
+    assert repository.list_recent(limit=5, offset=10) == [record]
+
+    statement = session.scalars.call_args.args[0]
+    rendered = str(statement)
+    assert "ORDER BY predictions.created_at DESC" in rendered
+    assert "LIMIT" in rendered
+    assert "OFFSET" in rendered
+
+
+def test_repository_list_recent_applies_all_history_filters() -> None:
+    session = MagicMock(spec=Session)
+    session.scalars.return_value.all.return_value = []
+    repository = PredictionRepository(session)
+    created_from = datetime(2026, 1, 1, tzinfo=UTC)
+    created_to = datetime(2026, 1, 31, 23, 59, 59, tzinfo=UTC)
+
+    repository.list_recent(
+        limit=10,
+        created_from=created_from,
+        created_to=created_to,
+        min_risk_score=0.25,
+        max_risk_score=0.75,
+        decision=PredictionDecision.FRAUD,
+        review_status=ReviewStatus.PENDING,
+    )
+
+    statement = session.scalars.call_args.args[0]
+    rendered = str(statement)
+    assert "predictions.created_at >=" in rendered
+    assert "predictions.created_at <=" in rendered
+    assert "predictions.risk_score >=" in rendered
+    assert "predictions.risk_score <=" in rendered
+    assert "predictions.decision =" in rendered
+    assert "predictions.review_status =" in rendered
+
+
+def test_repository_review_update_rejects_a_terminal_transition() -> None:
+    session = MagicMock(spec=Session)
+    record = Prediction(
+        prediction_id=uuid4(),
+        transaction_id="txn-terminal",
+        created_at=datetime.now(UTC),
+        model_version="model-v1",
+        model_sha256="a" * 64,
+        risk_score=0.75,
+        threshold=0.5,
+        decision="fraud",
+        review_status="confirmed_fraud",
+    )
+    session.get.return_value = record
+    repository = PredictionRepository(session)
+
+    with pytest.raises(InvalidReviewTransitionError, match="not allowed"):
+        repository.set_review_status(record.prediction_id, ReviewStatus.CONFIRMED_LEGITIMATE)
+
+    assert record.review_status == "confirmed_fraud"
+    session.commit.assert_not_called()
+
+
+def test_repository_review_update_rejects_a_transition_back_to_pending() -> None:
+    session = MagicMock(spec=Session)
+    record = Prediction(
+        prediction_id=uuid4(),
+        transaction_id="txn-pending",
+        created_at=datetime.now(UTC),
+        model_version="model-v1",
+        model_sha256="a" * 64,
+        risk_score=0.75,
+        threshold=0.5,
+        decision="fraud",
+        review_status="pending",
+    )
+    session.get.return_value = record
+    repository = PredictionRepository(session)
+
+    with pytest.raises(InvalidReviewTransitionError, match="not allowed"):
+        repository.set_review_status(record.prediction_id, ReviewStatus.PENDING)
+
+    assert record.review_status == "pending"
+    session.commit.assert_not_called()
+
+
+def test_repository_summarize_counts_and_risk_bins() -> None:
+    session = MagicMock(spec=Session)
+    row = {
+        "total_predictions": 4,
+        "fraud_predictions": 2,
+        "legitimate_predictions": 2,
+        "pending_reviews": 1,
+        "confirmed_fraud": 2,
+        "confirmed_legitimate": 1,
+    }
+    for index in range(10):
+        row[f"risk_bin_{index}"] = 0
+    row["risk_bin_0"] = 1
+    row["risk_bin_7"] = 2
+    row["risk_bin_9"] = 1
+    session.execute.return_value.mappings.return_value.one.return_value = row
+    repository = PredictionRepository(session)
+
+    summary = repository.summarize()
+
+    assert summary.total_predictions == 4
+    assert summary.fraud_predictions == 2
+    assert summary.legitimate_predictions == 2
+    assert summary.pending_reviews == 1
+    assert summary.confirmed_fraud == 2
+    assert summary.confirmed_legitimate == 1
+    assert [(item.lower, item.upper, item.count) for item in summary.risk_bins] == [
+        (0.0, 0.1, 1),
+        (0.1, 0.2, 0),
+        (0.2, 0.3, 0),
+        (0.3, 0.4, 0),
+        (0.4, 0.5, 0),
+        (0.5, 0.6, 0),
+        (0.6, 0.7, 0),
+        (0.7, 0.8, 2),
+        (0.8, 0.9, 0),
+        (0.9, 1.0, 1),
+    ]
+    session.execute.assert_called_once()
+    session.rollback.assert_not_called()
+
+
+def test_repository_rejects_an_invalid_history_page() -> None:
+    session = MagicMock(spec=Session)
+    repository = PredictionRepository(session)
+
+    with pytest.raises(ValueError, match="limit"):
+        repository.list_recent(limit=0)
+    with pytest.raises(ValueError, match="offset"):
+        repository.list_recent(offset=-1)
+
+    session.scalars.assert_not_called()
+
+
+def test_repository_history_list_failure_rolls_back() -> None:
+    session = MagicMock(spec=Session)
+    session.scalars.side_effect = SQLAlchemyError("connection lost")
+    repository = PredictionRepository(session)
+
+    with pytest.raises(PersistenceError, match="could not read prediction history"):
+        repository.list_recent()
+
+    session.rollback.assert_called_once()
+
+
+def test_repository_summary_failure_rolls_back() -> None:
+    session = MagicMock(spec=Session)
+    session.execute.side_effect = SQLAlchemyError("connection lost")
+    repository = PredictionRepository(session)
+
+    with pytest.raises(PersistenceError, match="could not summarize prediction history"):
+        repository.summarize()
+
+    session.rollback.assert_called_once()
+
+
 def test_repository_read_failure_rolls_back() -> None:
     session = MagicMock(spec=Session)
     session.get.side_effect = SQLAlchemyError("connection lost")
@@ -205,6 +385,7 @@ def test_repository_review_failure_rolls_back() -> None:
         risk_score=0.75,
         threshold=0.5,
         decision="fraud",
+        review_status="pending",
     )
     session.get.return_value = record
     session.commit.side_effect = SQLAlchemyError("database went away")

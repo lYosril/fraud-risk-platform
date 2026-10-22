@@ -22,7 +22,11 @@ from sqlalchemy import Engine, create_engine, delete, inspect, text
 from sqlalchemy.exc import OperationalError
 
 from fraud_risk.db.models import Prediction, PredictionDecision, ReviewStatus
-from fraud_risk.db.repository import PredictionCreate, PredictionRepository
+from fraud_risk.db.repository import (
+    InvalidReviewTransitionError,
+    PredictionCreate,
+    PredictionRepository,
+)
 from fraud_risk.db.session import build_session_factory
 
 pytestmark = pytest.mark.integration
@@ -147,6 +151,36 @@ def test_prediction_round_trip_and_review_status_update(migrated_engine: Engine)
             )
             assert updated is not None
             assert updated.review_status == "confirmed_fraud"
+
+            listed = repository.list_recent(limit=100)
+            assert any(record.prediction_id == prediction_id for record in listed)
+
+            filtered = repository.list_recent(
+                limit=100,
+                created_from=fetched.created_at,
+                created_to=fetched.created_at,
+                min_risk_score=0.8,
+                max_risk_score=0.82,
+                decision=PredictionDecision.FRAUD,
+                review_status=ReviewStatus.CONFIRMED_FRAUD,
+            )
+            assert any(record.prediction_id == prediction_id for record in filtered)
+            assert all(record.decision == "fraud" for record in filtered)
+            assert all(record.review_status == "confirmed_fraud" for record in filtered)
+
+            with pytest.raises(InvalidReviewTransitionError, match="not allowed"):
+                repository.set_review_status(
+                    prediction_id,
+                    ReviewStatus.CONFIRMED_LEGITIMATE,
+                )
+            unchanged = repository.get(prediction_id)
+            assert unchanged is not None
+            assert unchanged.review_status == "confirmed_fraud"
+
+            summary = repository.summarize()
+            assert summary.total_predictions >= 1
+            assert summary.fraud_predictions >= 1
+            assert sum(item.count for item in summary.risk_bins) == summary.total_predictions
     finally:
         with session_factory() as cleanup:
             cleanup.execute(delete(Prediction).where(Prediction.transaction_id == transaction_id))

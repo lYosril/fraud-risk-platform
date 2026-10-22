@@ -104,6 +104,34 @@ class ReviewUpdateRequest(BaseModel):
     review_status: ReviewStatus
 
 
+class RiskBinResponse(BaseModel):
+    """One fixed-width bucket in the persisted risk-score distribution."""
+
+    lower: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    upper: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    count: int = Field(ge=0)
+
+
+class PredictionSummaryResponse(BaseModel):
+    """Aggregate prediction-history counts for the admin dashboard overview."""
+
+    total_predictions: int = Field(ge=0)
+    fraud_predictions: int = Field(ge=0)
+    legitimate_predictions: int = Field(ge=0)
+    pending_reviews: int = Field(ge=0)
+    confirmed_fraud: int = Field(ge=0)
+    confirmed_legitimate: int = Field(ge=0)
+    risk_bins: list[RiskBinResponse]
+
+
+class PredictionHistoryResponse(BaseModel):
+    """A bounded, newest-first page of persisted prediction metadata."""
+
+    items: list[PredictionRecordResponse]
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
 class PredictionRequest(BaseModel):
     """One transaction submitted for scoring.
 
@@ -315,9 +343,12 @@ __all__ = [
     "HealthResponse",
     "ModelMetadataResponse",
     "PredictionExplanation",
+    "PredictionHistoryResponse",
     "PredictionRecordResponse",
     "PredictionRequest",
     "PredictionResponse",
+    "PredictionSummaryResponse",
     "ReadinessResponse",
     "ReviewUpdateRequest",
+    "RiskBinResponse",
 ]

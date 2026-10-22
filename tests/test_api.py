@@ -28,7 +28,14 @@ from fraud_risk.api.dependencies import get_inference_service, get_prediction_re
 from fraud_risk.api.main import create_app
 from fraud_risk.config import Settings
 from fraud_risk.db.models import Prediction, PredictionDecision, ReviewStatus
-from fraud_risk.db.repository import PersistenceError, PredictionCreate
+from fraud_risk.db.repository import (
+    RISK_BIN_COUNT,
+    InvalidReviewTransitionError,
+    PersistenceError,
+    PredictionCreate,
+    PredictionSummary,
+    RiskBin,
+)
 from fraud_risk.models.bundle import FrozenModel
 from fraud_risk.models.evaluation import CostPolicy
 from fraud_risk.models.inference import (
@@ -141,6 +148,75 @@ class FakePredictionRepository:
             raise self.error
         return self.records.get(prediction_id)
 
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        min_risk_score: float | None = None,
+        max_risk_score: float | None = None,
+        decision: PredictionDecision | None = None,
+        review_status: ReviewStatus | None = None,
+    ) -> list[Prediction]:
+        if self.error is not None:
+            raise self.error
+        ordered = sorted(
+            self.records.values(),
+            key=lambda record: (record.created_at, str(record.prediction_id)),
+            reverse=True,
+        )
+        filtered: list[Prediction] = []
+        for record in ordered:
+            if created_from is not None and record.created_at < created_from:
+                continue
+            if created_to is not None and record.created_at > created_to:
+                continue
+            if min_risk_score is not None and record.risk_score < min_risk_score:
+                continue
+            if max_risk_score is not None and record.risk_score > max_risk_score:
+                continue
+            if decision is not None and record.decision != decision.value:
+                continue
+            if review_status is not None and record.review_status != review_status.value:
+                continue
+            filtered.append(record)
+        return filtered[offset : offset + limit]
+
+    def summarize(self) -> PredictionSummary:
+        if self.error is not None:
+            raise self.error
+        records = list(self.records.values())
+        bins = []
+        for index in range(RISK_BIN_COUNT):
+            lower = index / RISK_BIN_COUNT
+            upper = (index + 1) / RISK_BIN_COUNT
+            count = sum(
+                1
+                for record in records
+                if record.risk_score >= lower
+                and (
+                    record.risk_score < upper
+                    if index < RISK_BIN_COUNT - 1
+                    else record.risk_score <= upper
+                )
+            )
+            bins.append(RiskBin(lower=lower, upper=upper, count=count))
+        return PredictionSummary(
+            total_predictions=len(records),
+            fraud_predictions=sum(1 for record in records if record.decision == "fraud"),
+            legitimate_predictions=sum(1 for record in records if record.decision == "legitimate"),
+            pending_reviews=sum(1 for record in records if record.review_status == "pending"),
+            confirmed_fraud=sum(
+                1 for record in records if record.review_status == "confirmed_fraud"
+            ),
+            confirmed_legitimate=sum(
+                1 for record in records if record.review_status == "confirmed_legitimate"
+            ),
+            risk_bins=tuple(bins),
+        )
+
     def set_review_status(
         self,
         prediction_id: UUID,
@@ -151,25 +227,33 @@ class FakePredictionRepository:
         record = self.records.get(prediction_id)
         if record is None:
             return None
-        record.review_status = ReviewStatus(review_status).value
+        target = ReviewStatus(review_status)
+        if record.review_status != ReviewStatus.PENDING.value or target is ReviewStatus.PENDING:
+            msg = f"review transition from {record.review_status} to {target.value} is not allowed"
+            raise InvalidReviewTransitionError(msg)
+        record.review_status = target.value
         return record
 
 
 def make_stored_prediction(
     *,
     prediction_id: UUID | None = None,
+    created_at: datetime | None = None,
     review_status: ReviewStatus = ReviewStatus.PENDING,
+    transaction_id: str = "txn-stored",
+    risk_score: float = 0.75,
+    decision: PredictionDecision = PredictionDecision.FRAUD,
 ) -> Prediction:
     """Build an ORM-shaped record for the read/review routes without a database."""
     return Prediction(
         prediction_id=prediction_id or uuid4(),
-        transaction_id="txn-stored",
-        created_at=datetime.now(UTC),
+        transaction_id=transaction_id,
+        created_at=created_at or datetime.now(UTC),
         model_version=MODEL_VERSION,
         model_sha256=MODEL_SHA,
-        risk_score=0.75,
+        risk_score=risk_score,
         threshold=0.5,
-        decision=PredictionDecision.FRAUD.value,
+        decision=decision.value,
         review_status=review_status.value,
         feature_snapshot={"amount": 42.5, "features": {"V1": 0.1, "V2": -0.2}},
     )
@@ -339,6 +423,8 @@ def test_admin_routes_fail_closed_when_the_token_is_not_configured() -> None:
 
     for method, path in (
         ("GET", "/api/v1/model"),
+        ("GET", "/api/v1/predictions"),
+        ("GET", "/api/v1/predictions/summary"),
         ("GET", f"/api/v1/predictions/{prediction_id}"),
         ("PATCH", f"/api/v1/predictions/{prediction_id}/review"),
     ):
@@ -450,6 +536,229 @@ def test_prediction_history_maps_a_storage_failure_to_a_safe_503() -> None:
     assert "database is down" not in response.text
 
 
+def test_prediction_history_list_is_bounded_and_newest_first() -> None:
+    repository = FakePredictionRepository()
+    older = make_stored_prediction(transaction_id="txn-older")
+    newer = make_stored_prediction(transaction_id="txn-newer")
+    older.created_at = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    newer.created_at = datetime(2026, 1, 2, 12, tzinfo=UTC)
+    repository.records[older.prediction_id] = older
+    repository.records[newer.prediction_id] = newer
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/predictions?limit=1&offset=0",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["limit"] == 1
+    assert body["offset"] == 0
+    assert [item["transaction_id"] for item in body["items"]] == ["txn-newer"]
+    assert "feature_snapshot" not in body["items"][0]
+    assert "V1" not in response.text
+
+
+def test_prediction_history_list_rejects_an_invalid_page_size() -> None:
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/predictions?limit=0",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+def test_prediction_history_filters_by_date_risk_decision_and_review_status() -> None:
+    repository = FakePredictionRepository()
+    matching = make_stored_prediction(
+        transaction_id="txn-matching",
+        created_at=datetime(2026, 1, 15, 12, tzinfo=UTC),
+        risk_score=0.75,
+        decision=PredictionDecision.FRAUD,
+        review_status=ReviewStatus.PENDING,
+    )
+    records = [
+        matching,
+        make_stored_prediction(
+            transaction_id="txn-outside-date",
+            created_at=datetime(2025, 12, 31, 12, tzinfo=UTC),
+            risk_score=0.75,
+            decision=PredictionDecision.FRAUD,
+            review_status=ReviewStatus.PENDING,
+        ),
+        make_stored_prediction(
+            transaction_id="txn-other-decision",
+            created_at=datetime(2026, 1, 15, 12, tzinfo=UTC),
+            risk_score=0.75,
+            decision=PredictionDecision.LEGITIMATE,
+            review_status=ReviewStatus.PENDING,
+        ),
+        make_stored_prediction(
+            transaction_id="txn-already-reviewed",
+            created_at=datetime(2026, 1, 15, 12, tzinfo=UTC),
+            risk_score=0.75,
+            decision=PredictionDecision.FRAUD,
+            review_status=ReviewStatus.CONFIRMED_FRAUD,
+        ),
+        make_stored_prediction(
+            transaction_id="txn-other-risk",
+            created_at=datetime(2026, 1, 15, 12, tzinfo=UTC),
+            risk_score=0.25,
+            decision=PredictionDecision.FRAUD,
+            review_status=ReviewStatus.PENDING,
+        ),
+    ]
+    for record in records:
+        repository.records[record.prediction_id] = record
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        (
+            "/api/v1/predictions?"
+            "created_from=2026-01-01T00%3A00%3A00Z&"
+            "created_to=2026-01-31T23%3A59%3A59Z&"
+            "min_risk_score=0.5&max_risk_score=0.9&"
+            "decision=fraud&review_status=pending"
+        ),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert [item["transaction_id"] for item in response.json()["items"]] == ["txn-matching"]
+
+
+def test_prediction_history_rejects_inverted_or_ambiguous_filters() -> None:
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    inverted_dates = request(
+        app,
+        "GET",
+        (
+            "/api/v1/predictions?"
+            "created_from=2026-02-01T00%3A00%3A00Z&"
+            "created_to=2026-01-01T00%3A00%3A00Z"
+        ),
+        headers=ADMIN_HEADERS,
+    )
+    inverted_scores = request(
+        app,
+        "GET",
+        "/api/v1/predictions?min_risk_score=0.9&max_risk_score=0.1",
+        headers=ADMIN_HEADERS,
+    )
+    naive_date = request(
+        app,
+        "GET",
+        "/api/v1/predictions?created_from=2026-01-01T00%3A00%3A00",
+        headers=ADMIN_HEADERS,
+    )
+    unknown_decision = request(
+        app,
+        "GET",
+        "/api/v1/predictions?decision=maybe",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert inverted_dates.status_code == 422
+    assert inverted_dates.json() == {"detail": "created_from must not be after created_to"}
+    assert inverted_scores.status_code == 422
+    assert inverted_scores.json() == {
+        "detail": "min_risk_score must not be greater than max_risk_score"
+    }
+    assert naive_date.status_code == 422
+    assert naive_date.json() == {"detail": "created_from must include a timezone"}
+    assert unknown_decision.status_code == 422
+
+
+def test_prediction_summary_returns_aggregate_counts() -> None:
+    repository = FakePredictionRepository()
+    records = [
+        make_stored_prediction(
+            transaction_id="txn-low",
+            risk_score=0.05,
+            decision=PredictionDecision.LEGITIMATE,
+            review_status=ReviewStatus.CONFIRMED_LEGITIMATE,
+        ),
+        make_stored_prediction(
+            transaction_id="txn-high",
+            risk_score=0.95,
+            decision=PredictionDecision.FRAUD,
+            review_status=ReviewStatus.CONFIRMED_FRAUD,
+        ),
+        make_stored_prediction(
+            transaction_id="txn-mid",
+            risk_score=0.75,
+            decision=PredictionDecision.FRAUD,
+            review_status=ReviewStatus.PENDING,
+        ),
+    ]
+    for record in records:
+        repository.records[record.prediction_id] = record
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/predictions/summary",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_predictions"] == 3
+    assert body["fraud_predictions"] == 2
+    assert body["legitimate_predictions"] == 1
+    assert body["pending_reviews"] == 1
+    assert body["confirmed_fraud"] == 1
+    assert body["confirmed_legitimate"] == 1
+    assert len(body["risk_bins"]) == RISK_BIN_COUNT
+    assert [item["count"] for item in body["risk_bins"]].count(1) == 3
+    assert "feature_snapshot" not in response.text
+    assert "V1" not in response.text
+
+
+def test_prediction_history_routes_map_storage_failures_to_safe_503s() -> None:
+    repository = FakePredictionRepository(error=PersistenceError("database is down"))
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    for path in ("/api/v1/predictions", "/api/v1/predictions/summary"):
+        response = request(app, "GET", path, headers=ADMIN_HEADERS)
+        assert response.status_code == 503
+        assert response.json() == {"detail": "prediction storage unavailable"}
+        assert "database is down" not in response.text
+
+
 def test_review_update_is_authenticated_and_persists_the_transition() -> None:
     repository = FakePredictionRepository()
     record = make_stored_prediction()
@@ -504,6 +813,67 @@ def test_review_update_rejects_an_invalid_status_and_unknown_record() -> None:
     assert invalid.status_code == 422
     assert record.review_status == "pending"
     assert unknown.status_code == 404
+
+
+def test_review_update_rejects_terminal_and_reverse_transitions() -> None:
+    repository = FakePredictionRepository()
+    record = make_stored_prediction()
+    repository.records[record.prediction_id] = record
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+    path = f"/api/v1/predictions/{record.prediction_id}/review"
+
+    first = request(
+        app,
+        "PATCH",
+        path,
+        headers=ADMIN_HEADERS,
+        json={"review_status": "confirmed_fraud"},
+    )
+    second = request(
+        app,
+        "PATCH",
+        path,
+        headers=ADMIN_HEADERS,
+        json={"review_status": "confirmed_legitimate"},
+    )
+    back_to_pending = request(
+        app,
+        "PATCH",
+        path,
+        headers=ADMIN_HEADERS,
+        json={"review_status": "pending"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert "not allowed" in second.json()["detail"]
+    assert back_to_pending.status_code == 409
+    assert record.review_status == "confirmed_fraud"
+
+
+def test_review_update_maps_storage_failure_to_a_safe_503() -> None:
+    repository = FakePredictionRepository(error=PersistenceError("database is down"))
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "PATCH",
+        f"/api/v1/predictions/{uuid4()}/review",
+        headers=ADMIN_HEADERS,
+        json={"review_status": "confirmed_fraud"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "prediction storage unavailable"}
+    assert "database is down" not in response.text
 
 
 def test_history_path_rejects_an_invalid_uuid_before_the_repository() -> None:
@@ -1027,6 +1397,8 @@ def test_local_openapi_covers_every_versioned_endpoint() -> None:
         "/api/v1/model",
         "/api/v1/predict",
         "/api/v1/predict/batch",
+        "/api/v1/predictions",
+        "/api/v1/predictions/summary",
         "/api/v1/predictions/{prediction_id}",
         "/api/v1/predictions/{prediction_id}/review",
     }
@@ -1036,6 +1408,8 @@ def test_local_openapi_covers_every_versioned_endpoint() -> None:
     assert "results" in components["BatchPredictionResponse"]["properties"]
     assert "feature_snapshot" not in components["PredictionRecordResponse"]["properties"]
     assert "review_status" in components["ReviewUpdateRequest"]["properties"]
+    assert "risk_bins" in components["PredictionSummaryResponse"]["properties"]
+    assert "items" in components["PredictionHistoryResponse"]["properties"]
     assert {"index", "transaction_id", "status", "prediction", "error"} <= set(
         components["BatchPredictionItemResult"]["properties"]
     )

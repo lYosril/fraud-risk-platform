@@ -22,10 +22,11 @@ Rules
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -43,16 +44,23 @@ from fraud_risk.api.schemas import (
     ErrorResponse,
     HealthResponse,
     ModelMetadataResponse,
+    PredictionHistoryResponse,
     PredictionRecordResponse,
     PredictionRequest,
     PredictionResponse,
+    PredictionSummaryResponse,
     ReadinessResponse,
     ReviewUpdateRequest,
+    RiskBinResponse,
 )
 from fraud_risk.api.validation import safe_validation_detail
 from fraud_risk.config import Settings
-from fraud_risk.db.models import PredictionDecision
-from fraud_risk.db.repository import PredictionCreate, PredictionRepository
+from fraud_risk.db.models import PredictionDecision, ReviewStatus
+from fraud_risk.db.repository import (
+    InvalidReviewTransitionError,
+    PredictionCreate,
+    PredictionRepository,
+)
 from fraud_risk.models.inference import (
     FraudInferenceService,
     InferenceError,
@@ -150,6 +158,93 @@ async def model_metadata(
 
 
 @router.get(
+    "/predictions/summary",
+    response_model=PredictionSummaryResponse,
+    dependencies=[Depends(require_admin_api_token)],
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": ErrorResponse,
+            "description": "Missing or invalid administrative bearer token",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "Prediction storage is unavailable or the admin API is disabled",
+        },
+    },
+    summary="Aggregate prediction history (admin)",
+)
+async def prediction_summary(
+    repository: PredictionRepositoryDep,
+) -> PredictionSummaryResponse:
+    """Return bounded aggregate counts for the dashboard overview."""
+    summary = await run_in_threadpool(repository.summarize)
+    return PredictionSummaryResponse(
+        total_predictions=summary.total_predictions,
+        fraud_predictions=summary.fraud_predictions,
+        legitimate_predictions=summary.legitimate_predictions,
+        pending_reviews=summary.pending_reviews,
+        confirmed_fraud=summary.confirmed_fraud,
+        confirmed_legitimate=summary.confirmed_legitimate,
+        risk_bins=[
+            RiskBinResponse(lower=item.lower, upper=item.upper, count=item.count)
+            for item in summary.risk_bins
+        ],
+    )
+
+
+@router.get(
+    "/predictions",
+    response_model=PredictionHistoryResponse,
+    dependencies=[Depends(require_admin_api_token)],
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": ErrorResponse,
+            "description": "Missing or invalid administrative bearer token",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "Prediction storage is unavailable or the admin API is disabled",
+        },
+    },
+    summary="List persisted prediction history (admin)",
+)
+async def list_predictions(
+    repository: PredictionRepositoryDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    created_from: Annotated[datetime | None, Query(description="Inclusive UTC start")] = None,
+    created_to: Annotated[datetime | None, Query(description="Inclusive UTC end")] = None,
+    min_risk_score: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+    max_risk_score: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+    decision: Annotated[PredictionDecision | None, Query()] = None,
+    review_status: Annotated[ReviewStatus | None, Query()] = None,
+) -> PredictionHistoryResponse:
+    """Return filtered, bounded newest-first history; feature snapshots are never exposed."""
+    _validate_history_filters(
+        created_from=created_from,
+        created_to=created_to,
+        min_risk_score=min_risk_score,
+        max_risk_score=max_risk_score,
+    )
+    records = await run_in_threadpool(
+        repository.list_recent,
+        limit=limit,
+        offset=offset,
+        created_from=created_from,
+        created_to=created_to,
+        min_risk_score=min_risk_score,
+        max_risk_score=max_risk_score,
+        decision=decision,
+        review_status=review_status,
+    )
+    return PredictionHistoryResponse(
+        items=[PredictionRecordResponse.model_validate(record) for record in records],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
     "/predictions/{prediction_id}",
     response_model=PredictionRecordResponse,
     dependencies=[Depends(require_admin_api_token)],
@@ -198,7 +293,11 @@ async def get_prediction(
         },
         422: {
             "model": ErrorResponse,
-            "description": "The review status is not a permitted value",
+            "description": "The review status is not a permitted value or transition",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "The prediction is already reviewed or the transition is not allowed",
         },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "model": ErrorResponse,
@@ -213,11 +312,17 @@ async def review_prediction(
     repository: PredictionRepositoryDep,
 ) -> PredictionRecordResponse:
     """Persist an analyst review transition and return the updated, non-sensitive record."""
-    record = await run_in_threadpool(
-        repository.set_review_status,
-        prediction_id,
-        request.review_status,
-    )
+    try:
+        record = await run_in_threadpool(
+            repository.set_review_status,
+            prediction_id,
+            request.review_status,
+        )
+    except InvalidReviewTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -354,6 +459,36 @@ async def predict_batch(
         failed=len(results) - succeeded,
         results=results,
     )
+
+
+def _validate_history_filters(
+    *,
+    created_from: datetime | None,
+    created_to: datetime | None,
+    min_risk_score: float | None,
+    max_risk_score: float | None,
+) -> None:
+    """Reject ambiguous or empty filter ranges before the database query runs."""
+    for name, value in (("created_from", created_from), ("created_to", created_to)):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name} must include a timezone",
+            )
+    if created_from is not None and created_to is not None and created_from > created_to:
+        raise HTTPException(
+            status_code=422,
+            detail="created_from must not be after created_to",
+        )
+    if (
+        min_risk_score is not None
+        and max_risk_score is not None
+        and min_risk_score > max_risk_score
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="min_risk_score must not be greater than max_risk_score",
+        )
 
 
 def _batch_error(index: int, raw: dict[str, Any], detail: str) -> BatchPredictionItemResult:

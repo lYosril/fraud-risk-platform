@@ -6,13 +6,15 @@
 > comparison still open. There is one real tracking run, not a two-run history. M5 has the
 > shared artifact-bundle loader, the offline and per-request XGBoost SHAP layer, a reusable lazy
 > inference service and FastAPI-ready request/response schemas; registry alias resolution and
-> the promotion gate are not implemented. M6 is partially implemented: the versioned HTTP
-> surface, dependency wiring, CORS policy and safe error mapping exist for health, readiness,
-> model metadata, single prediction and bounded batch prediction with per-item errors; prediction
-> persistence, read-back/feedback routes, request-id logging and database lifecycle work remain
-> open. The database, dashboard and monitoring
-> packages are still scaffolded. Real metrics from the local reference runs are recorded in the
-> README verification record and in the git-ignored artifacts; they describe those runs only.
+> the promotion gate are not implemented. M2 has the predictions table, Alembic migration and
+> repository read/write/filtered-history/summary paths; feedback-label and drift-report tables
+> remain open. M6 is partially implemented: the versioned HTTP surface, dependency wiring, CORS policy,
+> safe error mapping and admin-protected history/filtering/summary/review routes exist;
+> request-id logging and feedback capture remain open. M7 is partially implemented: the
+> Streamlit overview, scoring, filtered history, explanation and analyst-review views read and
+> write through the API; drift-history views are still future work. The monitoring package is
+> still scaffolded. Real metrics from the local reference runs are recorded in the README
+> verification record and in the git-ignored artifacts; they describe those runs only.
 
 ---
 
@@ -82,9 +84,9 @@ code in `src/fraud_risk/`, so training/serving skew is a bug, not a design assum
 | 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `bundle.py`, `explainability.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost/operating-policy analysis, frozen final evaluation, artifact-bundle loading and SHAP explanations. | Splitting, the three-family comparison (logistic regression, random forest, XGBoost), calibration, per-class/cost metrics, validation-only cost/min-recall/alert-capacity policies, the frozen final evaluation, XGBoost SHAP explanations and serving inference implemented; CV and reliability/Brier comparison pending |
 | 3a | Experiment tracking | `src/fraud_risk/tracking.py` | Optional MLflow boundary: configurable tracking URI, deterministic run fingerprint, parameter/tag/metric/artifact logging, explicit failed-run status. Registration and promotion are deliberately outside it. | Implemented for the training CLI; one real local SQLite-backed run demonstrated. No model registered |
 | 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | `models.inference` implemented: lazy validated artifact loading, schema/order and preprocessing compatibility checks, one-row scoring through the fitted pipeline, frozen binary threshold, model version/SHA and optional SHAP. Registry aliases remain scaffolded; `api.schemas` provides Pydantic request/response models |
-| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Application factory, dependency providers, versioned health/readiness/model-metadata/single-prediction/batch-prediction/history/review routes, Pydantic contracts, per-item batch errors, request/batch limits, CORS policy, safe error mapping, admin bearer-token auth and access logging implemented; dashboard and monitoring pending (M6) |
-| 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Scaffolded |
-| 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, drift history. Talks to the API/DB, never to model internals. | Scaffolded |
+| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Application factory, dependency providers, versioned health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review routes, Pydantic contracts, per-item batch errors, request/batch limits, CORS policy, safe error mapping, admin bearer-token auth and access logging implemented; monitoring and request IDs pending (M6) |
+| 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Predictions model, session lifecycle, initial Alembic migration and repository create/read/list/summary/review paths implemented; feedback-label and drift-report tables pending (M2) |
+| 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, drift history. Talks to the API/DB, never to model internals. | Overview counts, risk/decision/review charts, filtered history, transaction scoring, explanation rendering and an admin-only analyst review workflow implemented against the API; drift-history views pending (M7) |
 | 8 | Monitoring | `src/fraud_risk/monitoring/` | Drift detection on inputs and scores, delayed-label performance tracking, report persistence. | Scaffolded |
 | 9 | Tests & deployment | `tests/`, `.github/workflows/`, `docker-compose.yml` | Unit/integration tests, CI pipeline, local infrastructure. | Scaffolded |
 
@@ -165,15 +167,26 @@ not create an import cycle with training or configuration.
 `Settings.api_prefix` (default `/api/v1`): `GET /health` (liveness only), `GET /ready`
 (attempts to load and validate the artifact; `200` ready, `503` not ready), `GET /model`
 (admin-only: model name/version/SHA/family/threshold/feature schema), `POST /predict` (one
-transaction), `POST /predict/batch` (a bounded list), `GET /predictions/{id}` (admin-only
-history) and `PATCH /predictions/{id}/review` (admin-only analyst review). Each successful
-prediction carries the model identity, probability, applied threshold, raw binary `prediction`
-and a human-readable `decision`. Batch items are validated independently: a malformed
-transaction produces a safe error at its own index while valid items are still scored. The
-batch item count is capped by `BATCH_MAX_SIZE`, and an ASGI middleware enforces
-`API_MAX_REQUEST_BYTES` before JSON parsing. Model loading, scoring and repository calls run in
-Starlette's thread pool behind async handlers. Model failures are logged server-side and
-returned as a non-leaking `503 {"detail": "model unavailable"}`.
+transaction), `POST /predict/batch` (a bounded list), `GET /predictions` (admin-only bounded,
+newest-first history with optional `created_from`/`created_to`, risk-score, decision and
+review-status filters), `GET /predictions/summary` (admin-only aggregate counts and fixed-width
+risk bins), `GET /predictions/{id}` (admin-only history) and
+`PATCH /predictions/{id}/review` (admin-only analyst review). Each successful prediction
+carries the model identity, probability, applied threshold, raw binary `prediction` and a
+human-readable `decision`. Batch items are validated independently: a malformed transaction
+produces a safe error at its own index while valid items are still scored. The batch item count
+is capped by `BATCH_MAX_SIZE`, and an ASGI middleware enforces `API_MAX_REQUEST_BYTES` before
+JSON parsing. Model loading, scoring and repository calls run in Starlette's thread pool behind
+async handlers. Model failures are logged server-side and returned as a non-leaking
+`503 {"detail": "model unavailable"}`.
+
+**Predicted versus confirmed fraud.** `decision` is the model's thresholded prediction. It is
+never ground truth and never a human review outcome. Every persisted prediction starts with
+`review_status="pending"`; an authorized analyst may move it to `confirmed_fraud` or
+`confirmed_legitimate`, and those states are terminal. An invalid transition returns `409`
+without a commit. The summary's `fraud_predictions` count is derived from the model `decision`,
+whereas `confirmed_fraud` is derived only from the analyst review status. No code path copies a
+model prediction into a confirmed outcome.
 
 **Access model.** Health, readiness and scoring are public. Readiness reports availability only,
 not model identity or the feature schema. Model metadata, prediction history and review
@@ -194,6 +207,20 @@ rolls back and always closes. Access logs record method, path, status and durati
 never record query strings, headers, bearer tokens or request bodies. Validation details never
 echo the submitted feature values, and unexpected failures return
 `500 {"detail": "internal server error"}` without a traceback or filesystem path.
+
+**Dashboard (M7, partial).** The Streamlit app calls the admin-protected history/summary,
+model-metadata and review routes plus the public prediction route through
+`dashboard.api_client`; it never imports model internals or queries PostgreSQL directly.
+`dashboard.transformations` holds the deterministic counts/frame logic and `dashboard.charts`
+holds the Plotly figures. The overview uses database aggregate counts and fixed-width risk bins,
+so its totals do not depend on a paginated page. The analyst-review tab filters persisted rows
+by date, risk score, model prediction and review status, and only offers a review form for
+pending rows. Tables and metrics explicitly label the model's predicted label separately from
+the analyst's review outcome. Model performance remains explicitly unavailable until feedback
+labels or an evaluation endpoint exist. On an unreachable API or an invalid response, the
+affected section shows an error state rather than a synthetic dataset. The admin token comes
+from `Settings.api_admin_token`; review controls are hidden without it, and the API independently
+enforces authorization. The token is never embedded in the dashboard or displayed.
 
 ---
 

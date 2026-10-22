@@ -1,13 +1,16 @@
 """Streamlit analytics dashboard (architecture area 7).
 
 Responsibility
-    Read-only views over stored predictions and drift reports.
+    Read-only views over stored predictions plus a public transaction-scoring form. The
+    dashboard talks to the versioned HTTP API and never imports model internals or database
+    code.
 
 Boundary
-    The dashboard consumes the API (or, for aggregate queries, the database) and never
-    imports model internals. It must not become a second, divergent implementation of the
-    scoring logic.
+    ``api_client`` owns HTTP and response validation, ``transformations`` owns deterministic
+    table/count logic, ``charts`` owns Plotly figures, and ``app`` owns Streamlit rendering.
+    There is no demo dataset: an unreachable API or an empty history is shown as such.
 
 Status
-    Scaffolding only. See ``docs/ROADMAP.md`` (M7).
+    Overview, filtered history, scoring, explanation and analyst-review views are implemented.
+    Drift-history views remain future M7 work.
 """

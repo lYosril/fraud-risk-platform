@@ -10,16 +10,19 @@ and what does not.
 
 ---
 
-## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability, reusable inference and the versioned FastAPI backend complete; single/batch scoring, prediction persistence, admin-protected history/review, dashboard and monitoring pending
+## ⚠️ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability, reusable inference, the versioned FastAPI backend, PostgreSQL prediction persistence, an analyst review workflow and an interactive Streamlit dashboard complete; monitoring pending
 
 **Milestone M0 (repository foundation) is complete, the Python 3.11 development environment
 is provisioned, the dataset workflow (acquisition, presence check and contract validation) is
 implemented, and the exploratory analysis, split, preprocessing, model-comparison, frozen
-final-evaluation, SHAP explanation, reusable inference-service and HTTP API stages are
-implemented. A winning model artifact, a frozen binary operating decision, an explainability
-report and a versioned health/readiness/model-metadata/single-prediction/batch-prediction API
-exist locally, and successful predictions are persisted to PostgreSQL with admin-protected
-read-back and review routes. The dashboard and monitoring are not implemented yet.**
+final-evaluation, SHAP explanation, reusable inference-service, HTTP API and dashboard stages
+are implemented. A winning model artifact, a frozen binary operating decision, an
+explainability report, a versioned health/readiness/model-metadata/single-prediction/
+batch-prediction API, PostgreSQL-backed prediction history, admin-protected review routes, a
+filtered analyst review workflow and a Streamlit overview/scoring dashboard exist locally. The
+dashboard shows real stored traffic, keeps the model's predicted label separate from the
+analyst's review outcome, and explicitly reports missing performance metrics rather than
+inventing them. Monitoring is not implemented yet.**
 
 - **A real three-family comparison and a frozen final evaluation have been run** on the local
   reference dataset (logistic regression, random forest, XGBoost). Their actual metrics are
@@ -105,9 +108,9 @@ does not happen.
 | 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** and serialised inside the model bundle |
 | 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4) |
 | 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Reusable inference service **implemented** (lazy validated load, schema/order checks, score, optional SHAP); registry aliases **scaffolded** (M5) |
-| 5 | FastAPI application | `fraud_risk/api/` | Versioned health, readiness, model-metadata, single-prediction, batch-prediction, history and review routes **implemented** with Pydantic contracts, per-item batch errors, request/batch limits, CORS configuration, safe error mapping, admin bearer-token auth and access logging; dashboard and monitoring **pending** (M6) |
-| 6 | Database layer | `fraud_risk/db/` | Scaffolded |
-| 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Scaffolded |
+| 5 | FastAPI application | `fraud_risk/api/` | Versioned health, readiness, model-metadata, single-prediction, batch-prediction, history-list/summary and review routes **implemented** with Pydantic contracts, per-item batch errors, request/batch limits, CORS configuration, safe error mapping, admin bearer-token auth and access logging; monitoring **pending** (M6) |
+| 6 | Database layer | `fraud_risk/db/` | Prediction ORM model, session/engine lifecycle, Alembic migration and repository read/write/summary paths **implemented**; feedback-label and drift-report tables pending (M2) |
+| 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Overview, risk distribution, decision/review charts, filtered history, transaction scoring, explanation view and an admin-only analyst review workflow **implemented** against the API; drift-history views pending (M7) |
 | 8 | Monitoring | `fraud_risk/monitoring/` | Scaffolded |
 | 9 | Tests, CI, containers | `tests/`, `.github/`, `docker-compose.yml` | Scaffolded |
 
@@ -154,7 +157,7 @@ fraud-risk-platform/
 â”‚   â”‚                         # final_evaluation, registry, inference
 â”‚   â”œâ”€â”€ db/                   # base, models, session (+ Alembic migrations in M2)
 â”‚   â”œâ”€â”€ api/                  # main (app factory), routes, dependencies, schemas
-â”‚   â”œâ”€â”€ dashboard/            # Streamlit app
+â”‚   â”œâ”€â”€ dashboard/            # Streamlit app, API client, transformations, Plotly charts
 â”‚   â””â”€â”€ monitoring/           # drift
 â””â”€â”€ tests/
     â”œâ”€â”€ test_config.py          # configuration contract
@@ -173,6 +176,9 @@ fraud-risk-platform/
     â”œâ”€â”€ test_tracking.py          # MLflow config, redaction, run fingerprint
     â””â”€â”€ test_smoke_imports.py     # environment smoke test (declared / installed / importable)
 ```
+
+The dashboard has dedicated tests for its HTTP client (`tests/test_dashboard_client.py`) and
+for the pure counting/frame transformations (`tests/test_dashboard_transforms.py`).
 
 ---
 
@@ -648,8 +654,10 @@ ReDoc and debug mode.
 | `GET /api/v1/model` | admin | Model name, version, SHA-256, family, threshold and feature schema |
 | `POST /api/v1/predict` | public | Scores one transaction through `FraudInferenceService` and persists the result |
 | `POST /api/v1/predict/batch` | public | Scores a bounded list, returning one result or safe error per item |
+| `GET /api/v1/predictions` | admin | Lists a filtered, bounded page of persisted history. Query parameters: `created_from`, `created_to` (inclusive, timezone-aware), `min_risk_score`, `max_risk_score`, `decision`, `review_status`, `limit`, `offset`. Feature snapshots are never returned. |
+| `GET /api/v1/predictions/summary` | admin | Aggregate counts and fixed-width risk bins for the dashboard overview |
 | `GET /api/v1/predictions/{id}` | admin | Reads one persisted prediction (never the feature snapshot) |
-| `PATCH /api/v1/predictions/{id}/review` | admin | Updates the analyst review status and returns the updated record |
+| `PATCH /api/v1/predictions/{id}/review` | admin | Records `confirmed_fraud` or `confirmed_legitimate` for a pending prediction. Reviewed states are terminal; an invalid transition returns `409`. |
 
 Admin routes require `Authorization: Bearer <API_ADMIN_TOKEN>`. The token must be at least 16
 characters when set. If it is unset, those routes return `503` rather than becoming anonymous.
@@ -671,6 +679,85 @@ and never echo the submitted feature values. Unexpected failures return
 thread pool, writes commit once per unit of work, and database failures roll back to a safe
 `503`. Access logs contain method, path, status and duration only: no query strings, headers,
 tokens or request bodies.
+
+### Running the Streamlit dashboard
+
+The dashboard talks to the API over HTTP; it never imports the model, reads the artifact or
+queries PostgreSQL directly. Start PostgreSQL, apply the migration, start the API, then start
+Streamlit in a second terminal.
+
+```bash
+docker compose up -d postgres
+python -m alembic upgrade head
+python -m uvicorn fraud_risk.api.main:app --host 127.0.0.1 --port 8000
+```
+
+Set the dashboard's API URL and an administrative token. `API_ADMIN_TOKEN` enables the
+overview, recent history and model-feature form; the scoring endpoint itself stays public.
+Use a locally generated value of at least 16 characters and never commit it:
+
+**PowerShell**
+
+```powershell
+$env:DASHBOARD_API_URL = "http://localhost:8000"
+$env:API_ADMIN_TOKEN = "<your-local-admin-token>"
+streamlit run src/fraud_risk/dashboard/app.py
+```
+
+**Bash**
+
+```bash
+export DASHBOARD_API_URL="http://localhost:8000"
+export API_ADMIN_TOKEN="<your-local-admin-token>"
+streamlit run src/fraud_risk/dashboard/app.py
+```
+
+Open `http://localhost:8501`. The API and dashboard need the same token value; if the API was
+started without one, the admin routes return `503` and the dashboard shows that state.
+
+What the dashboard shows:
+
+- **Overview** — total stored predictions, model-flagged count, flag rate and pending reviews,
+  read from `GET /api/v1/predictions/summary`; fixed-width risk-score distribution, decision
+  mix, review-state mix and hourly volume, read from the same summary and the bounded history
+  page. History tables label the model column "Model predicted label" and the human column
+  "Analyst review outcome".
+- **Recent predictions** — the newest 200 stored records without feature snapshots.
+- **Analyst review** — filters persisted predictions by scored date, model risk-score range,
+  model predicted label and analyst review state, then records `confirmed_fraud` or
+  `confirmed_legitimate` for one pending transaction. The selected record shows the model label
+  and analyst outcome side by side. Reviewed states are terminal, so the form is not offered
+  once a row has an outcome.
+- **Score a transaction** — builds a form from the loaded bundle's exact feature order
+  (`GET /api/v1/model`), calls `POST /api/v1/predict`, and displays probability, applied
+  threshold, decision and the optional top-k SHAP explanation with a Plotly chart.
+- **Model performance** — explicitly unavailable. The platform stores predictions but does
+  not yet capture delayed feedback labels or expose an evaluation endpoint, so PR-AUC, recall
+  and similar metrics are not shown. No illustrative or synthetic metric is substituted.
+
+The review controls appear only when the dashboard has `API_ADMIN_TOKEN`; the API independently
+requires the same bearer token on every history and review request.
+
+### Predicted fraud vs confirmed fraud
+
+These are different facts and are stored in different fields:
+
+| Field | Meaning | Who sets it |
+|-------|---------|-------------|
+| `decision` | The model's thresholded **prediction** (`fraud` or `legitimate`) for one transaction | The scoring path, from the calibrated risk score and frozen threshold |
+| `review_status` / review outcome | The analyst's **human review state**: `pending`, `confirmed_fraud` or `confirmed_legitimate` | An authorized analyst through `PATCH /api/v1/predictions/{id}/review` |
+
+A model prediction of `fraud` is always persisted as `review_status="pending"`. It is **not**
+counted as confirmed fraud, and nothing in the platform converts a model decision into a human
+outcome automatically. The overview's model-flagged count comes from `decision`; its
+`confirmed_fraud` count comes only from analyst-reviewed rows. A review starts pending and may
+move to exactly one of the two terminal outcomes. Repeating an outcome, switching between
+confirmed outcomes, or moving back to `pending` is rejected with HTTP `409`.
+
+The dashboard has no bundled demo dataset. If the database is empty, the overview says so; if
+the API is unreachable or returns malformed data, the affected section shows an error and the
+rest of the page remains usable. The admin token is read from `Settings`/the environment, is
+sent only in the `Authorization` header, and is never displayed or logged.
 
 ### Production security settings and known limitations
 
@@ -695,9 +782,12 @@ Known limitations, stated plainly:
   is secure. Review the infrastructure, secret injection, network boundary and database
   permissions separately.
 
-**Current scope:** successful predictions are persisted, and `GET /api/v1/predictions/{id}` plus
-`PATCH /api/v1/predictions/{id}/review` provide admin-protected read-back and review. Feedback
-labels, the dashboard and monitoring remain later milestones.
+**Current scope:** successful predictions are persisted, `GET /api/v1/predictions` and
+`GET /api/v1/predictions/summary` provide filtered admin-protected history pages and overview
+counts, `GET /api/v1/predictions/{id}` plus `PATCH /api/v1/predictions/{id}/review` provide
+read-back and terminal analyst-review transitions, and the Streamlit dashboard renders that
+real history, scores new transactions and records analyst outcomes. Feedback labels, drift views
+and monitoring remain later milestones.
 
 ### Request and response examples
 
@@ -811,7 +901,7 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
 
 - `ruff format --check .` and `ruff check .` report no findings.
 - `mypy` reports `Success: no issues found` (strict mode).
-- `pytest -q` passes seventeen suites:
+- `pytest -q` passes all nineteen test files:
   - `tests/test_config.py` â€” the configuration contract (version parity, secret-free
     defaults, DSN construction and percent-encoding, threshold validation, caching).
   - `tests/test_dataset.py` â€” the dataset contract: the expected 31-column header,
@@ -874,14 +964,23 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
   - `tests/test_api.py` — the versioned HTTP contract: health, availability-only readiness
     (including a missing artifact), admin bearer-token auth and fail-closed behaviour, model
     metadata, dependency-overridden single and batch prediction, persisted history without the
-    feature snapshot, review updates, per-item batch errors, empty/oversized batches,
+    feature snapshot, filtered/bounded newest-first history pages, aggregate summary/risk bins,
+    allowed and rejected review transitions, per-item batch errors, empty/oversized batches,
     request-body limits, validation and safe error mapping including a generic 500, CORS
     allow/deny and admin preflight, production docs removal, factory laziness and a subprocess
     proof that importing the app opens no network connection.
   - `tests/test_db.py` — the database contract: ORM shape and privacy defaults, repository
-    commit/rollback policy for create/read/review, request-scoped session rollback/close, and
-    offline Alembic rendering. `tests/test_db_integration.py` performs the real PostgreSQL
-    round-trip and schema check when `TEST_DATABASE_URL` is set.
+    commit/rollback policy for create/read/filtered-list/summary/review, terminal review-state
+    enforcement, request-scoped session rollback/close, and offline Alembic rendering.
+    `tests/test_db_integration.py` performs the real PostgreSQL round-trip, filtered history,
+    summary and schema checks when `TEST_DATABASE_URL` is set.
+  - `tests/test_dashboard_client.py` — URL construction, history-filter serialization, bearer
+    handling without token leakage, review PATCH calls, `409` conflict mapping, timeouts/
+    unreachable APIs, safe HTTP errors, malformed JSON, response-contract validation,
+    feature-order preservation and local input rejection.
+  - `tests/test_dashboard_transforms.py` — empty-state handling, flag rate, decision/review
+    buckets, risk-band labels, predicted-label vs analyst-outcome display tables, hourly volume,
+    UTC timestamps and explanation ordering.
   - `tests/test_smoke_imports.py` â€” the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
@@ -899,10 +998,10 @@ Reproduce everything with the commands above.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 62 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 67 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 54 source files | Success, 32 source files |
-| `pytest -q` | **385 passed** (4 third-party warnings, 58.35 s) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 59 source files | Success, 32 source files |
+| `pytest -q` | **430 passed** (4 third-party warnings, 42.13 s) | **138 passed** (same warnings) |
 
 The `pytest -q` row includes the two PostgreSQL integration tests; without `TEST_DATABASE_URL`
 they are skipped. The suite was run against this worktree; it is not a claim that a deployment

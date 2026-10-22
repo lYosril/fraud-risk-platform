@@ -6,10 +6,12 @@ comparison, frozen final-evaluation path and one real MLflow-tracked run, but st
 two-run history, stratified CV and the reliability/Brier comparison. M5 is in progress: the
 bundle contract, XGBoost SHAP layer and reusable inference service are implemented; registry
 alias resolution and the promotion gate are not. M6 is partially implemented: the versioned
-health/readiness/model-metadata/single-prediction/batch-prediction/history/review routes,
-per-item batch errors, request/batch limits, CORS policy, safe error mapping, prediction
+health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review
+routes, per-item batch errors, request/batch limits, CORS policy, safe error mapping, prediction
 persistence and admin bearer-token auth are in place, while request-id propagation and feedback
-capture remain open. M2 and M7â€”M9 are not started.**
+capture remain open. M2 is partially implemented (predictions table, migration and repository;
+feedback/drift tables open). M7 is partially implemented (overview, scoring, filtered history,
+explanation and analyst-review views; drift history open). M8–M9 are not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
 because code exists â€” it is done when its exit criteria pass and the evidence is recorded.
@@ -252,7 +254,10 @@ resolution, persistence and the promotion gate remain pending.
   `GET /ready` (loads/validates the model; `200`/`503`, availability only), `GET /model`
   (admin-only identity and feature contract), `POST /predict` (one transaction),
   `POST /predict/batch` (bounded list with per-item success/error results),
-  `GET /predictions/{id}` and `PATCH /predictions/{id}/review` (admin-only read-back/review).
+  `GET /predictions` (admin-only bounded, filterable history page), `GET /predictions/summary`
+  (admin-only aggregate counts and risk bins), `GET /predictions/{id}` and
+  `PATCH /predictions/{id}/review` (admin-only read-back/review). Review updates enforce a
+  pending-to-terminal transition and reject invalid updates with `409`.
   Model loading, scoring and repository calls run in Starlette's thread pool behind async
   handlers.
 - Persistence of every prediction; documented, non-leaking error responses. **Done**:
@@ -298,6 +303,15 @@ rate limiting remain open, so the milestone is not complete.
 - Views: traffic over time, score distribution with threshold markers, decision mix,
   review-queue table, per-prediction explanation drill-down, drift history.
 - Plotly charts; API base URL from settings.
+
+**Implemented so far:** `dashboard.api_client` (typed HTTP client, admin bearer token from
+`Settings`, filter query serialization, review PATCH, safe failure states),
+`dashboard.transformations` (counts, risk bins, frames, predicted-label vs analyst-outcome
+display), `dashboard.charts` (Plotly risk/decision/review/volume/explanation figures) and
+`dashboard.app` (overview, filtered history, analyst-review workflow, transaction scoring and
+explanation view). The API added `GET /predictions` filtering, `GET /predictions/summary` and
+terminal review transitions for real stored traffic. The per-prediction drill-down route/UI and
+drift history remain open; therefore M7 is not complete.
 
 **Exit criteria**
 

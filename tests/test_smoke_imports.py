@@ -78,7 +78,8 @@ REQUIRED_SYMBOLS = (
     "shap.TreeExplainer",  # models.inference (explanations)
     "sqlalchemy.orm.DeclarativeBase",  # db.base
     "alembic.config.Config",  # db migrations
-    "fastapi.testclient.TestClient",  # api tests; also proves fastapi + httpx agree
+    "fastapi.FastAPI",  # api.main
+    "httpx.ASGITransport",  # api tests; direct ASGI transport, no TestClient bridge
     "plotly.express.line",  # dashboard
 )
 

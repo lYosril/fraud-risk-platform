@@ -10,15 +10,16 @@ and what does not.
 
 ---
 
-## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability and reusable inference complete; no HTTP API served yet
+## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability, reusable inference and the versioned FastAPI backend complete; single/batch scoring, prediction persistence, admin-protected history/review, dashboard and monitoring pending
 
 **Milestone M0 (repository foundation) is complete, the Python 3.11 development environment
 is provisioned, the dataset workflow (acquisition, presence check and contract validation) is
 implemented, and the exploratory analysis, split, preprocessing, model-comparison, frozen
-final-evaluation, SHAP explanation and reusable inference-service stages are implemented. A
-winning model artifact, a frozen binary operating decision, an explainability report and a
-validated in-process scoring path exist locally; no FastAPI routes, dashboard or monitoring are
-served yet.**
+final-evaluation, SHAP explanation, reusable inference-service and HTTP API stages are
+implemented. A winning model artifact, a frozen binary operating decision, an explainability
+report and a versioned health/readiness/model-metadata/single-prediction/batch-prediction API
+exist locally, and successful predictions are persisted to PostgreSQL with admin-protected
+read-back and review routes. The dashboard and monitoring are not implemented yet.**
 
 - **A real three-family comparison and a frozen final evaluation have been run** on the local
   reference dataset (logistic regression, random forest, XGBoost). Their actual metrics are
@@ -101,10 +102,10 @@ does not happen.
 |---|------|---------|--------|
 | 0 | Configuration | `fraud_risk/config.py` | **Implemented** (settings + tests) |
 | 1 | Data ingestion & validation | `fraud_risk/data/` | Loading + contract validation **implemented**; fingerprint pending (M1) |
-| 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** (not yet serialised) |
+| 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** and serialised inside the model bundle |
 | 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4) |
 | 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Reusable inference service **implemented** (lazy validated load, schema/order checks, score, optional SHAP); registry aliases **scaffolded** (M5) |
-| 5 | FastAPI application | `fraud_risk/api/` | Pydantic request/response schemas **implemented**; routes and persistence **scaffolded** (M6) |
+| 5 | FastAPI application | `fraud_risk/api/` | Versioned health, readiness, model-metadata, single-prediction, batch-prediction, history and review routes **implemented** with Pydantic contracts, per-item batch errors, request/batch limits, CORS configuration, safe error mapping, admin bearer-token auth and access logging; dashboard and monitoring **pending** (M6) |
 | 6 | Database layer | `fraud_risk/db/` | Scaffolded |
 | 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Scaffolded |
 | 8 | Monitoring | `fraud_risk/monitoring/` | Scaffolded |
@@ -152,7 +153,7 @@ fraud-risk-platform/
 â”‚   â”œâ”€â”€ models/               # splitting (leakage-safe split), training, evaluation,
 â”‚   â”‚                         # final_evaluation, registry, inference
 â”‚   â”œâ”€â”€ db/                   # base, models, session (+ Alembic migrations in M2)
-â”‚   â”œâ”€â”€ api/                  # main (app factory), schemas
+â”‚   â”œâ”€â”€ api/                  # main (app factory), routes, dependencies, schemas
 â”‚   â”œâ”€â”€ dashboard/            # Streamlit app
 â”‚   â””â”€â”€ monitoring/           # drift
 â””â”€â”€ tests/
@@ -168,6 +169,7 @@ fraud-risk-platform/
     â”œâ”€â”€ test_final_evaluation.py # frozen decision, one test scoring, policy/CLI checks
     â”œâ”€â”€ test_explainability.py   # SHAP schema, additivity, reports
     â”œâ”€â”€ test_inference.py         # bundle loading, input order, failures, API schemas
+    â”œâ”€â”€ test_api.py               # HTTPX ASGI tests: routes, auth, readiness, CORS, docs
     â”œâ”€â”€ test_tracking.py          # MLflow config, redaction, run fingerprint
     â””â”€â”€ test_smoke_imports.py     # environment smoke test (declared / installed / importable)
 ```
@@ -627,11 +629,189 @@ The request schema rejects unknown fields, label fields (`is_fraud` / `Class`), 
 `Amount` inside `features`, negative amounts and non-finite values. No feature snapshot or raw
 request payload is written to the response.
 
+### Running the FastAPI backend
+
+Start the local server from the repository root:
+
+```bash
+python -m uvicorn fraud_risk.api.main:app --host 127.0.0.1 --port 8000
+```
+
+The interactive OpenAPI documentation is at `http://127.0.0.1:8000/docs`; the raw schema is at
+`http://127.0.0.1:8000/openapi.json`. Both are disabled when `APP_ENV=production`, along with
+ReDoc and debug mode.
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `GET /api/v1/health` | public | Process liveness only; does not claim the model is loadable |
+| `GET /api/v1/ready` | public | Loads and validates the configured model; `200` when ready, `503` otherwise |
+| `GET /api/v1/model` | admin | Model name, version, SHA-256, family, threshold and feature schema |
+| `POST /api/v1/predict` | public | Scores one transaction through `FraudInferenceService` and persists the result |
+| `POST /api/v1/predict/batch` | public | Scores a bounded list, returning one result or safe error per item |
+| `GET /api/v1/predictions/{id}` | admin | Reads one persisted prediction (never the feature snapshot) |
+| `PATCH /api/v1/predictions/{id}/review` | admin | Updates the analyst review status and returns the updated record |
+
+Admin routes require `Authorization: Bearer <API_ADMIN_TOKEN>`. The token must be at least 16
+characters when set. If it is unset, those routes return `503` rather than becoming anonymous.
+A missing or wrong token returns `401` with `WWW-Authenticate: Bearer`.
+
+Both prediction routes return the model version, risk probability, applied threshold, the raw
+binary `prediction` and its human-readable `decision` (`legitimate` or `fraud`). The route
+handlers are asynchronous; model loading, preprocessing and `predict_proba` run in Starlette's
+thread pool so the event loop is not blocked.
+
+Readiness is deliberately separate from health: a running process with a missing, corrupt or
+incompatible artifact reports `503` with `model_available: false` instead of pretending to be
+ready. Readiness exposes availability only, not model identity or the feature schema. Model
+failures are logged server-side and returned to clients as a generic
+`{"detail": "model unavailable"}` so filesystem paths and internals are not exposed.
+Request-validation failures are normalized to the same `{"detail": "<field>: <reason>"}` shape
+and never echo the submitted feature values. Unexpected failures return
+`500 {"detail": "internal server error"}` without a traceback. Repository calls run in the
+thread pool, writes commit once per unit of work, and database failures roll back to a safe
+`503`. Access logs contain method, path, status and duration only: no query strings, headers,
+tokens or request bodies.
+
+### Production security settings and known limitations
+
+Set `API_ADMIN_TOKEN` from a secret manager (never from a committed file) to enable model
+metadata, history and review. Set `CORS_ALLOWED_ORIGINS` to the exact dashboard origin;
+`Authorization` and `PATCH` are allowed for the admin routes. Keep `API_HOST` on a private
+interface and terminate TLS at a reverse proxy or load balancer — the application does not
+terminate TLS itself. Disable interactive docs in production (`APP_ENV=production` does this
+automatically). `PERSIST_FEATURE_SNAPSHOT` remains off by default; enabling it stores raw model
+inputs and requires an explicit storage/privacy review.
+
+Known limitations, stated plainly:
+
+- Scoring remains public and returns model version/SHA/family/threshold in each prediction.
+  Protect or redact scoring too if model identity is sensitive in your environment.
+- The admin surface uses one shared token. There is no per-user identity, role model, token
+  rotation, revocation list or rate limiting. Access logs are not an audit trail of who
+  reviewed what.
+- The API does not itself provide HTTPS, a WAF, request authentication for scoring, or
+  protection against a compromised host. Those belong to the deployment platform.
+- Tests passing means the documented behaviours are covered; it does not prove the deployment
+  is secure. Review the infrastructure, secret injection, network boundary and database
+  permissions separately.
+
+**Current scope:** successful predictions are persisted, and `GET /api/v1/predictions/{id}` plus
+`PATCH /api/v1/predictions/{id}/review` provide admin-protected read-back and review. Feedback
+labels, the dashboard and monitoring remain later milestones.
+
+### Request and response examples
+
+**These examples are illustrative.** They use synthetic transaction ids and the public ULB
+credit-card benchmark's anonymised `V1..V28` feature contract; they are **not live banking
+transactions**, and the numeric outputs below are placeholders rather than a real evaluation.
+The feature list is abbreviated for readability: a real request must contain every feature
+declared by the loaded bundle, in that bundle's exact order.
+
+Single transaction request:
+
+```json
+{
+  "transaction_id": "synthetic-txn-0001",
+  "amount": 42.50,
+  "features": {"V1": -1.2, "V2": 0.4},
+  "explain": false
+}
+```
+
+Illustrative single response:
+
+```json
+{
+  "transaction_id": "synthetic-txn-0001",
+  "probability": 0.0817,
+  "threshold": 0.0042,
+  "prediction": 1,
+  "decision": "fraud",
+  "model_version": "<model-version>",
+  "model_sha256": "<sha256>",
+  "model_family": "xgboost",
+  "explanation": null
+}
+```
+
+Batch request, including one deliberately invalid item:
+
+```json
+{
+  "items": [
+    {
+      "transaction_id": "synthetic-txn-0001",
+      "amount": 42.50,
+      "features": {"V1": -1.2, "V2": 0.4}
+    },
+    {
+      "transaction_id": "synthetic-txn-0002",
+      "amount": -1.0,
+      "features": {"V1": 0.0, "V2": 0.0}
+    }
+  ]
+}
+```
+
+Illustrative batch response. The valid item is still scored; the invalid item is reported at
+the same index and does not corrupt the batch:
+
+```json
+{
+  "model_version": "<model-version>",
+  "model_sha256": "<sha256>",
+  "model_family": "xgboost",
+  "threshold": 0.0042,
+  "total": 2,
+  "succeeded": 1,
+  "failed": 1,
+  "results": [
+    {
+      "index": 0,
+      "transaction_id": "synthetic-txn-0001",
+      "status": "ok",
+      "prediction": {
+        "transaction_id": "synthetic-txn-0001",
+        "probability": 0.0817,
+        "threshold": 0.0042,
+        "prediction": 1,
+        "decision": "fraud",
+        "model_version": "<model-version>",
+        "model_sha256": "<sha256>",
+        "model_family": "xgboost",
+        "explanation": null
+      },
+      "error": null
+    },
+    {
+      "index": 1,
+      "transaction_id": "synthetic-txn-0002",
+      "status": "error",
+      "prediction": null,
+      "error": "amount: Input should be greater than or equal to 0"
+    }
+  ]
+}
+```
+
+Batch and request-size limits are configuration, not hardcoded route constants:
+
+- `BATCH_MAX_SIZE` defaults to `100`; a larger batch returns `413`.
+- `API_MAX_REQUEST_BYTES` defaults to `1_048_576`; the limit is enforced before JSON parsing and
+  an oversized body returns `413 {"detail": "request body too large"}`.
+- An empty `items` list or a non-object item returns `422`.
+- A missing/corrupt model returns `503` for the whole batch, never a misleading per-item error.
+
+CORS is configured through `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact origins
+(for example `http://localhost:8501`). The default is empty, credentials are never allowed, and a
+wildcard is rejected outside `local`/`test`. Keep public scoring bound to loopback or a private
+network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
+
 ### What to look for
 
 - `ruff format --check .` and `ruff check .` report no findings.
 - `mypy` reports `Success: no issues found` (strict mode).
-- `pytest -q` passes fourteen suites:
+- `pytest -q` passes seventeen suites:
   - `tests/test_config.py` â€” the configuration contract (version parity, secret-free
     defaults, DSN construction and percent-encoding, threshold validation, caching).
   - `tests/test_dataset.py` â€” the dataset contract: the expected 31-column header,
@@ -691,26 +871,42 @@ request payload is written to the response.
     incompatible artifacts fail with a model error, an optional XGBoost explanation is
     returned, and the FastAPI-ready request/response schemas reject labels and out-of-range
     values without exposing a feature snapshot.
+  - `tests/test_api.py` — the versioned HTTP contract: health, availability-only readiness
+    (including a missing artifact), admin bearer-token auth and fail-closed behaviour, model
+    metadata, dependency-overridden single and batch prediction, persisted history without the
+    feature snapshot, review updates, per-item batch errors, empty/oversized batches,
+    request-body limits, validation and safe error mapping including a generic 500, CORS
+    allow/deny and admin preflight, production docs removal, factory laziness and a subprocess
+    proof that importing the app opens no network connection.
+  - `tests/test_db.py` — the database contract: ORM shape and privacy defaults, repository
+    commit/rollback policy for create/read/review, request-scoped session rollback/close, and
+    offline Alembic rendering. `tests/test_db_integration.py` performs the real PostgreSQL
+    round-trip and schema check when `TEST_DATABASE_URL` is set.
   - `tests/test_smoke_imports.py` â€” the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
     (`ColumnTransformer`, `XGBClassifier`, `TreeExplainer`, `DeclarativeBase`,
-    `TestClient`, ...). It is marked `slow` because importing the ML and dashboard stack
+    `ASGITransport`, ...). It is marked `slow` because importing the ML and dashboard stack
     takes several seconds.
 
 ### Verification record
 
-Last full check on the supported interpreter (Python 3.11.9, Windows). The Linux column is the
-last `python:3.11-slim` run (Python 3.11.17) and **predates the EDA, splitting and modelling
+Last full check on the supported interpreter (Python 3.11.9, Windows), with the Compose
+PostgreSQL service reachable through `TEST_DATABASE_URL`. The Linux column is the last
+`python:3.11-slim` run (Python 3.11.17) and **predates the EDA, splitting, modelling and API
 stages**: Docker was not running when those changes were verified, so it was not re-run.
-Reproduce everything with the commands above â€” do not take it on trust.
+Reproduce everything with the commands above.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 52 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 62 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 46 source files | Success, 32 source files |
-| `pytest -q` | **319 passed** (5 third-party warnings, 54.08 s) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 54 source files | Success, 32 source files |
+| `pytest -q` | **385 passed** (4 third-party warnings, 58.35 s) | **138 passed** (same warnings) |
+
+The `pytest -q` row includes the two PostgreSQL integration tests; without `TEST_DATABASE_URL`
+they are skipped. The suite was run against this worktree; it is not a claim that a deployment
+or its infrastructure is secure.
 
 Tool versions: ruff 0.17.1, mypy 2.4.0, pytest 9.1.1, pandas-stubs 2.3.3.260113, pip 26.2.1.
 The container run used a clean venv and `pip install -e ".[dev]"`.
@@ -875,7 +1071,7 @@ Recorded honestly rather than implied to work:
 
 | Check | Why it cannot be run yet |
 |-------|--------------------------|
-| `pytest -m integration` | No integration tests exist; they arrive with M2/M6. |
+| `pytest -m integration` without `TEST_DATABASE_URL` | The two PostgreSQL tests skip by design; run Compose PostgreSQL and set the URL to execute them (done in the verification record above). |
 | `docker compose up` application stack | Only PostgreSQL is defined; app services arrive in M9. |
 | CI being green | `.github/workflows/ci.yml` has never run on GitHub. |
 | General model quality or production readiness | One temporal split has been scored; the test split is no longer a pristine holdout, there is only one real MLflow run (not a two-run history) and no reliability/Brier comparison, and the cost weights are provisional assumptions. The reported numbers describe this run, not a financial decision system. |
@@ -899,7 +1095,8 @@ Recorded honestly rather than implied to work:
 
 - Only public/anonymised datasets or small synthetic fixtures. **No real cardholder data.**
 - Account references are pseudo-anonymised; a PAN is never handled.
-- The API is unauthenticated at this stage and must be bound to loopback or a private network.
+- Public scoring must be bound to loopback or a private network; model metadata, prediction
+  history and review are protected by the configurable `API_ADMIN_TOKEN` bearer token.
 - `.env`, datasets, model artifacts and database volumes are git-ignored.
 
 ## Documentation

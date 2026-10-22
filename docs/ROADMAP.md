@@ -4,9 +4,12 @@ Milestones are ordered so that each one is independently demonstrable and no mil
 depends on an unfinished later one. **M0, M1 and M3 are complete. M4 is implemented for the
 comparison, frozen final-evaluation path and one real MLflow-tracked run, but still lacks a
 two-run history, stratified CV and the reliability/Brier comparison. M5 is in progress: the
-bundle contract, XGBoost SHAP layer, reusable inference service and API-facing request/response
-schemas are implemented; registry alias resolution, HTTP routes and the promotion gate are not.
-M2 and M6â€”M9 are not started.**
+bundle contract, XGBoost SHAP layer and reusable inference service are implemented; registry
+alias resolution and the promotion gate are not. M6 is partially implemented: the versioned
+health/readiness/model-metadata/single-prediction/batch-prediction/history/review routes,
+per-item batch errors, request/batch limits, CORS policy, safe error mapping, prediction
+persistence and admin bearer-token auth are in place, while request-id propagation and feedback
+capture remain open. M2 and M7â€”M9 are not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
 because code exists â€” it is done when its exit criteria pass and the evidence is recorded.
@@ -57,9 +60,9 @@ because code exists â€” it is done when its exit criteria pass and the evid
 - `data.validation` â€” **contract done**: required columns, duplicate column names, empty
   data, per-column null counts, numeric/finite non-target columns, and `Class` restricted
   to `0`/`1`, plus a report of row/feature/missing/duplicate/class counts and proportions.
-  Typed errors live in `data.errors`. Value-range checks are not implemented yet, and the
-  inference-side leakage guard (`is_fraud` must not reach the inference path) is still
-  pending (M6).
+  Typed errors live in `data.errors`. Value-range checks are not implemented yet; the API
+  request schema rejects `is_fraud`/`Class`, while a dedicated dataset-level inference guard
+  remains pending.
 - CLI entry point â€” **done**: `python -m fraud_risk.data` now runs the contract check after
   the presence/shape check, so a failure is reproducible from the command line.
 - **Unit tests done** for every rule above, including the failure cases
@@ -211,24 +214,24 @@ registered by the tracking integration.
   schema/order validation, fitted-preprocessor compatibility checks, one-row `predict_proba`,
   bundle threshold, model version/SHA and optional SHAP explanation. Scoring never fits or
   retrains. Missing/corrupt/incompatible artifacts raise a clear model error.
-- `api.schemas` â€” **done**: Pydantic v2 `PredictionRequest` / `PredictionResponse` ready for
-  FastAPI, rejecting label/unknown fields and constraining input/output ranges. Pydantic
-  schemas for the remaining API routes are still M6 work.
-- `models.registry`, route wiring and the documented promotion gate remain pending.
+- `api.schemas` â€” **done**: Pydantic v2 request/response and error contracts are used by the
+  versioned FastAPI routes, rejecting label/unknown fields and constraining input/output
+  ranges. Read-back/feedback schemas remain M6 work.
+- `models.registry`, persistence and the documented promotion gate remain pending.
 
 **Exit criteria**
 
 - Loading the configured bundle and scoring a fixture transaction returns a calibrated score:
   **met** by the synthetic inference tests; the service also loads the local real artifact.
 - Loading a *missing* bundle raises a clear error the API can turn into a 503: **met**
-  (`InferenceModelError`).
+  (`InferenceModelError`; the implemented API maps it to a non-leaking 503).
 - Explanations are produced for a single transaction well within an interactive latency budget:
   **met by the existing SHAP layer and wired through the new service on the selected XGBoost
   bundle**; the measured 11.4 ms median for one explanation excludes HTTP, persistence and the
   transaction's own feature construction.
 
-**Status:** the inference service and API schemas are implemented and tested. Registry alias
-resolution, FastAPI routes, persistence and the promotion gate remain pending.
+**Status:** the inference service and API contracts are implemented and tested. Registry alias
+resolution, persistence and the promotion gate remain pending.
 
 **Depends on:** M4.
 
@@ -238,26 +241,50 @@ resolution, FastAPI routes, persistence and the promotion gate remain pending.
 
 **Deliverables**
 
-- `api.main`: app factory, lifespan (load model once, dispose the engine on shutdown),
-  structured logging with request ids.
-- `api.schemas`: Pydantic v2 request/response models mirroring the Â§5.2 contract; validation
-  rejects label fields.
-- Routes: `GET /health` (process + model availability, reported separately), `POST /predict`,
-  `GET /predictions/{id}`, `POST /feedback`.
-- Persistence of every prediction; documented, non-leaking error responses.
-- Resolve the inherited `starlette.testclient` / `httpx` deprecation first:
-  `fastapi.testclient` currently warns *"Using `httpx` with `starlette.testclient` is
-  deprecated; install `httpx2` instead"*. Decide and pin before writing the API integration
-  tests, rather than discovering it halfway through them.
+- `api.main` â€” **done for the current surface**: application factory, process-wide settings and
+  one lazy inference service, versioned router, CORS policy, request-body limit middleware,
+  access logging, exception mapping, and production removal of `/docs`/`/openapi.json`. Lifespan
+  engine disposal is done; request-id propagation remains pending.
+- `api.schemas` â€” **done**: Pydantic v2 health, availability-only readiness,
+  model-metadata, single-prediction, batch-request/batch-result, persisted-record, review and
+  error models; validation rejects label fields, unknown fields and non-numeric feature values.
+- Routes under `Settings.api_prefix` â€” **done**: `GET /health` (liveness only),
+  `GET /ready` (loads/validates the model; `200`/`503`, availability only), `GET /model`
+  (admin-only identity and feature contract), `POST /predict` (one transaction),
+  `POST /predict/batch` (bounded list with per-item success/error results),
+  `GET /predictions/{id}` and `PATCH /predictions/{id}/review` (admin-only read-back/review).
+  Model loading, scoring and repository calls run in Starlette's thread pool behind async
+  handlers.
+- Persistence of every prediction; documented, non-leaking error responses. **Done**:
+  successful predictions are written through a request-scoped SQLAlchemy session, writes roll
+  back on failure, and read/review routes return the persisted record without exposing the
+  opt-in feature snapshot.
+- Administrative authentication. **Done for the current scope**: `API_ADMIN_TOKEN` protects
+  model metadata, history and review with a constant-time bearer-token check. Protected routes
+  fail closed with `503` when the token is unset.
+- Resolve the inherited `starlette.testclient` / `httpx` deprecation first. **Resolved for the
+  API suite** by testing through `httpx.ASGITransport` and dependency overrides, with no
+  `TestClient` dependence and no deprecation warning.
 
 **Exit criteria**
 
-- Integration tests run clean, with no `httpx`/`httpx2` deprecation warning.
-
+- Integration tests run clean, with no `httpx`/`httpx2` deprecation warning. **Met for
+  `tests/test_api.py`.**
 - `uvicorn` serves the OpenAPI docs; every endpoint has a documented success and failure case.
+  **OpenAPI schema coverage is tested; local startup, `/docs`, single/batch examples, auth and
+  the limits are documented.**
 - Integration tests via `httpx.ASGITransport` cover happy path, validation failure, unknown id,
-  and the no-model-loaded path.
+  and the no-model-loaded path. **Single and batch happy paths, per-item validation failure,
+  empty/oversized batches, body limits, missing-model 503, CORS preflight, admin auth failure,
+  unknown-id 404, history/review and production-doc removal are covered.**
 - A scored transaction is readable back from PostgreSQL and matches the response body.
+  **Implemented and covered by the PostgreSQL integration suite; re-run it against Compose
+  PostgreSQL before declaring the milestone complete.**
+
+**Status:** the versioned HTTP surface, bounded batch scoring, prediction persistence,
+admin-protected read-back/review, safe error mapping and access logging are implemented and
+tested. Request-id propagation, feedback capture, per-user authorization, token rotation and
+rate limiting remain open, so the milestone is not complete.
 
 **Depends on:** M5, M2.
 
@@ -327,7 +354,9 @@ resolution, FastAPI routes, persistence and the promotion gate remain pending.
 
 - Adopt a lock file (for example `uv.lock` or a `pip-compile`d constraints file) so CI and
   production resolve byte-identical dependency versions.
-- API authentication / API keys (ARCHITECTURE Â§13.5).
+- Per-user authentication and role-based authorization, token rotation/revocation and request
+  rate limiting for the API (the current admin bearer token is a single shared secret; see
+  ARCHITECTURE §13.5).
 - Model card per promoted version.
 - Batch scoring endpoint.
 - Automatic drift-triggered retraining (only after M8 has historical evidence).

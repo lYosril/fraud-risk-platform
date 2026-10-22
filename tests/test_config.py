@@ -39,6 +39,10 @@ CONFIG_ENV_VARS = (
     "API_HOST",
     "API_PORT",
     "API_PREFIX",
+    "CORS_ALLOWED_ORIGINS",
+    "BATCH_MAX_SIZE",
+    "API_MAX_REQUEST_BYTES",
+    "API_ADMIN_TOKEN",
     "DASHBOARD_API_URL",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
@@ -136,6 +140,9 @@ def test_default_api_binding_and_prefix(load_settings: Callable[..., Settings]) 
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert settings.api_prefix == "/api/v1"
+    assert settings.cors_origins == ()
+    assert settings.batch_max_size == 100
+    assert settings.api_max_request_bytes == 1_048_576
 
 
 def test_random_seed_defaults_and_is_bounded(load_settings: Callable[..., Settings]) -> None:
@@ -193,6 +200,13 @@ def test_environment_variables_override_defaults(
     monkeypatch.setenv("API_HOST", "192.0.2.10")
     monkeypatch.setenv("API_PORT", "9001")
     monkeypatch.setenv("API_PREFIX", "/internal/v2")
+    monkeypatch.setenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:8501,https://dashboard.example.internal",
+    )
+    monkeypatch.setenv("BATCH_MAX_SIZE", "7")
+    monkeypatch.setenv("API_MAX_REQUEST_BYTES", "2048")
+    monkeypatch.setenv("API_ADMIN_TOKEN", "staging-admin-token")
     monkeypatch.setenv("DASHBOARD_API_URL", "https://api.example.internal")
     monkeypatch.setenv("DATABASE_URL", PRODUCTION_DSN)
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://mlflow.internal:5000")
@@ -214,6 +228,14 @@ def test_environment_variables_override_defaults(
     assert settings.api_host == "192.0.2.10"
     assert settings.api_port == 9001
     assert settings.api_prefix == "/internal/v2"
+    assert settings.cors_origins == (
+        "http://localhost:8501",
+        "https://dashboard.example.internal",
+    )
+    assert settings.batch_max_size == 7
+    assert settings.api_max_request_bytes == 2048
+    assert settings.api_admin_token is not None
+    assert settings.api_admin_token.get_secret_value() == "staging-admin-token"
     assert settings.dashboard_api_url == "https://api.example.internal"
     assert settings.mlflow_tracking_uri == "http://mlflow.internal:5000"
     assert settings.mlflow_experiment_name == "fraud-staging"
@@ -287,6 +309,43 @@ def test_invalid_api_port_is_rejected(
         load_settings(api_port=bad_port)
 
 
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("batch_max_size", 0),
+        ("batch_max_size", 10_001),
+        ("api_max_request_bytes", 1023),
+        ("api_max_request_bytes", 16_777_217),
+    ],
+)
+def test_batch_and_body_limits_are_bounded(
+    load_settings: Callable[..., Settings],
+    field: str,
+    bad_value: int,
+) -> None:
+    """A nonsensical batch or body limit must fail at startup, not at request time."""
+    with pytest.raises(ValidationError, match=field):
+        load_settings(**{field: bad_value})
+
+
+def test_admin_token_is_normalised_bounded_and_not_rendered(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """A blank token disables admin routes; a weak one fails startup; dumps never leak it."""
+    assert load_settings(api_admin_token="   ").api_admin_token is None  # noqa: S106 - synthetic
+    padded_token = "  " + "a" * 16 + "  "
+    normalised = load_settings(api_admin_token=padded_token)
+    assert normalised.api_admin_token is not None
+    assert normalised.api_admin_token.get_secret_value() == "a" * 16
+
+    with pytest.raises(ValidationError, match="api_admin_token"):
+        load_settings(api_admin_token="too-short")  # noqa: S106 - synthetic
+
+    settings = load_settings(api_admin_token="a" * 16)
+    assert "a" * 16 not in repr(settings)
+    assert "a" * 16 not in str(settings.model_dump())
+
+
 def test_api_prefix_must_be_absolute(load_settings: Callable[..., Settings]) -> None:
     """A relative mount point would silently change every route."""
     with pytest.raises(ValidationError, match="must start with"):
@@ -305,6 +364,54 @@ def test_root_api_prefix_is_canonicalised(
 ) -> None:
     """Both spellings of "serve at the root" normalise to the empty prefix."""
     assert load_settings(api_prefix=root_prefix).api_prefix == ""
+
+
+@pytest.mark.parametrize(
+    "bad_origin",
+    [
+        "dashboard.example",
+        "https://dashboard.example/",
+        "https://dashboard.example/path",
+        "https://user:pass@dashboard.example",
+        "https://dashboard.example?query=1",
+        "*,https://dashboard.example",
+    ],
+)
+def test_cors_origins_must_be_exact_http_origins(
+    load_settings: Callable[..., Settings], bad_origin: str
+) -> None:
+    """CORS entries are browser origins, not URLs, globs or credentials."""
+    with pytest.raises(ValidationError, match="cors_allowed_origins"):
+        load_settings(cors_allowed_origins=bad_origin)
+
+
+def test_cors_wildcard_is_allowed_only_in_local_and_test(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """A wildcard is a development convenience, never a staging/production policy."""
+    assert load_settings(cors_allowed_origins="*").cors_origins == ("*",)
+    assert load_settings(app_env="test", cors_allowed_origins="*").cors_origins == ("*",)
+
+    for app_env in ("staging", "production"):
+        with pytest.raises(ValidationError, match="only allowed in local/test"):
+            load_settings(
+                app_env=app_env,
+                database_url=PRODUCTION_DSN,
+                cors_allowed_origins="*",
+            )
+
+
+def test_production_accepts_explicit_cors_origins(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """Production can allow a known dashboard origin without opening the API to everyone."""
+    settings = load_settings(
+        app_env="production",
+        database_url=PRODUCTION_DSN,
+        cors_allowed_origins="https://dashboard.example.internal",
+    )
+
+    assert settings.cors_origins == ("https://dashboard.example.internal",)
 
 
 @pytest.mark.parametrize(

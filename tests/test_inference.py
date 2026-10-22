@@ -333,6 +333,7 @@ def test_optional_explanation_is_separate_from_score_and_decision(
     assert response.probability == result.probability
     assert response.threshold == result.threshold
     assert response.prediction == result.prediction
+    assert response.decision == ("fraud" if result.prediction == 1 else "legitimate")
     assert response.model_version == FINGERPRINT
     assert response.explanation is not None
     assert len(response.explanation.contributions) == 3
@@ -398,6 +399,14 @@ def test_request_schema_rejects_labels_and_unknown_fields() -> None:
                 "is_fraud": 0,
             }
         )
+    with pytest.raises(ValidationError, match="valid number"):
+        PredictionRequest.model_validate(
+            {
+                "transaction_id": "txn",
+                "amount": 10.0,
+                "features": {**features, "V1": "0.1"},
+            }
+        )
 
 
 def test_response_schema_rejects_an_out_of_range_probability() -> None:
@@ -423,6 +432,7 @@ def test_response_serialises_without_a_feature_snapshot(trained: dict[str, Any])
         "probability",
         "threshold",
         "prediction",
+        "decision",
         "model_version",
         "model_sha256",
         "model_family",

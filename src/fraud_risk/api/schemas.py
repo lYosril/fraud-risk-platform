@@ -15,21 +15,93 @@ Rules
     - Error responses must not echo secrets or full payloads.
 
 Status
-    Request/response schemas implemented. FastAPI route wiring remains M6 work.
+    Request/response, batch, computed-decision, error, persisted-history and review schemas are
+    implemented and used by the versioned FastAPI routes.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Self
+from datetime import datetime
+from typing import Any, Literal, Self
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from fraud_risk.data.dataset import AMOUNT_COLUMN, TARGET_COLUMN
+from fraud_risk.db.models import PredictionDecision, ReviewStatus
 from fraud_risk.models.inference import InferenceRequest, PredictionResult
 
 #: The label names that must never appear on an inference payload.
 LABEL_FIELDS = frozenset({TARGET_COLUMN, "is_fraud"})
+
+
+class HealthResponse(BaseModel):
+    """Process liveness: the API is running and can answer requests."""
+
+    status: Literal["ok"]
+    service: str
+    version: str
+    environment: str
+
+
+class ReadinessResponse(BaseModel):
+    """Whether this process can actually serve a prediction right now.
+
+    Deliberately exposes availability only. Model identity and the feature schema live behind
+    the authenticated ``GET /model`` route, so an unauthenticated probe cannot enumerate them.
+    """
+
+    status: Literal["ready", "not_ready"]
+    model_available: bool
+    detail: str | None = None
+
+
+class ModelMetadataResponse(BaseModel):
+    """The loaded model's identity and serving contract, without exposing its path."""
+
+    model_name: str
+    model_version: str
+    model_sha256: str
+    model_family: str
+    threshold: float = Field(allow_inf_nan=False)
+    feature_count: int = Field(ge=1)
+    feature_columns: list[str]
+
+
+class ErrorResponse(BaseModel):
+    """The stable, non-leaking error shape used by the HTTP layer."""
+
+    detail: str
+
+
+class PredictionRecordResponse(BaseModel):
+    """Persisted prediction metadata returned by the authenticated history route.
+
+    ``feature_snapshot`` is intentionally absent even when persistence is configured to store
+    it: raw inputs are not needed to read a prediction back and must not leave the trust
+    boundary through this API.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    prediction_id: UUID
+    transaction_id: str
+    created_at: datetime
+    model_version: str
+    model_sha256: str
+    risk_score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    decision: PredictionDecision
+    review_status: ReviewStatus
+
+
+class ReviewUpdateRequest(BaseModel):
+    """An analyst review transition for one persisted prediction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_status: ReviewStatus
 
 
 class PredictionRequest(BaseModel):
@@ -40,12 +112,24 @@ class PredictionRequest(BaseModel):
     model feature with a direct business meaning and its own non-negative constraint.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     transaction_id: str = Field(min_length=1, max_length=128)
     amount: float = Field(ge=0.0, allow_inf_nan=False)
     features: dict[str, float] = Field(min_length=1)
     explain: bool = False
+
+    @field_validator("transaction_id")
+    @classmethod
+    def _validate_transaction_id(cls, value: str) -> str:
+        """Reject blank identifiers and control characters that could poison logs or rows."""
+        if not value.strip():
+            msg = "transaction_id must not be blank"
+            raise ValueError(msg)
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            msg = "transaction_id must not contain control characters"
+            raise ValueError(msg)
+        return value
 
     @field_validator("features")
     @classmethod
@@ -73,6 +157,23 @@ class PredictionRequest(BaseModel):
             features=dict(self.features),
             amount=self.amount,
         )
+
+
+class BatchPredictionRequest(BaseModel):
+    """A bounded list of raw transaction objects for batch scoring.
+
+    Items stay deliberately unparsed at this level so one malformed transaction cannot reject
+    the whole batch. The handler validates each object independently and returns a result or a
+    safe per-item error at the same index. ``Settings.batch_max_size`` is enforced by the route
+    because the maximum is deployment configuration, not a static schema constant.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[dict[str, Any]] = Field(
+        min_length=1,
+        description="Raw transaction objects; each is validated independently by the handler.",
+    )
 
 
 class ExplanationFeature(BaseModel):
@@ -115,6 +216,12 @@ class PredictionResponse(BaseModel):
     model_sha256: str
     model_family: str
     explanation: PredictionExplanation | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def decision(self) -> Literal["legitimate", "fraud"]:
+        """Human-readable interpretation of the binary model decision."""
+        return "fraud" if self.prediction == 1 else "legitimate"
 
     @classmethod
     def from_result(cls, result: PredictionResult) -> Self:
@@ -159,10 +266,58 @@ class PredictionResponse(BaseModel):
         )
 
 
+class BatchPredictionItemResult(BaseModel):
+    """One batch slot: either a prediction or a safe per-item validation error."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    transaction_id: str | None = None
+    status: Literal["ok", "error"]
+    prediction: PredictionResponse | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_payload_matches_status(self) -> Self:
+        """Require exactly one of ``prediction`` and ``error`` for a given status."""
+        if self.status == "ok":
+            if self.prediction is None or self.error is not None:
+                msg = "an ok batch result must carry a prediction and no error"
+                raise ValueError(msg)
+        elif self.prediction is not None or self.error is None:
+            msg = "an error batch result must carry an error and no prediction"
+            raise ValueError(msg)
+        return self
+
+
+class BatchPredictionResponse(BaseModel):
+    """The loaded model identity plus one result per submitted item, in input order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_version: str
+    model_sha256: str
+    model_family: str
+    threshold: float = Field(allow_inf_nan=False)
+    total: int = Field(ge=1)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    results: list[BatchPredictionItemResult] = Field(min_length=1)
+
+
 __all__ = [
     "LABEL_FIELDS",
+    "BatchPredictionItemResult",
+    "BatchPredictionRequest",
+    "BatchPredictionResponse",
+    "ErrorResponse",
     "ExplanationFeature",
+    "HealthResponse",
+    "ModelMetadataResponse",
     "PredictionExplanation",
+    "PredictionRecordResponse",
     "PredictionRequest",
     "PredictionResponse",
+    "ReadinessResponse",
+    "ReviewUpdateRequest",
 ]

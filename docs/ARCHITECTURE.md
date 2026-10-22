@@ -4,12 +4,15 @@
 > M0, M1 and M3 are complete. M4 is implemented for the three-family comparison, the frozen
 > final evaluation and MLflow run tracking, with stratified CV and the reliability/Brier
 > comparison still open. There is one real tracking run, not a two-run history. M5 has the
-> shared artifact-bundle loader, the offline and per-request XGBoost SHAP layer, and a
-> reusable lazy inference service with FastAPI-ready request/response schemas; the registry,
-> HTTP routes and promotion gate are not implemented. The API routes, database, dashboard and
-> monitoring packages are still scaffolded. Real metrics from the local reference runs are
-> recorded in the README verification record and in the git-ignored artifacts; they describe
-> those runs only.
+> shared artifact-bundle loader, the offline and per-request XGBoost SHAP layer, a reusable lazy
+> inference service and FastAPI-ready request/response schemas; registry alias resolution and
+> the promotion gate are not implemented. M6 is partially implemented: the versioned HTTP
+> surface, dependency wiring, CORS policy and safe error mapping exist for health, readiness,
+> model metadata, single prediction and bounded batch prediction with per-item errors; prediction
+> persistence, read-back/feedback routes, request-id logging and database lifecycle work remain
+> open. The database, dashboard and monitoring
+> packages are still scaffolded. Real metrics from the local reference runs are recorded in the
+> README verification record and in the git-ignored artifacts; they describe those runs only.
 
 ---
 
@@ -79,7 +82,7 @@ code in `src/fraud_risk/`, so training/serving skew is a bug, not a design assum
 | 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `bundle.py`, `explainability.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost/operating-policy analysis, frozen final evaluation, artifact-bundle loading and SHAP explanations. | Splitting, the three-family comparison (logistic regression, random forest, XGBoost), calibration, per-class/cost metrics, validation-only cost/min-recall/alert-capacity policies, the frozen final evaluation, XGBoost SHAP explanations and serving inference implemented; CV and reliability/Brier comparison pending |
 | 3a | Experiment tracking | `src/fraud_risk/tracking.py` | Optional MLflow boundary: configurable tracking URI, deterministic run fingerprint, parameter/tag/metric/artifact logging, explicit failed-run status. Registration and promotion are deliberately outside it. | Implemented for the training CLI; one real local SQLite-backed run demonstrated. No model registered |
 | 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | `models.inference` implemented: lazy validated artifact loading, schema/order and preprocessing compatibility checks, one-row scoring through the fitted pipeline, frozen binary threshold, model version/SHA and optional SHAP. Registry aliases remain scaffolded; `api.schemas` provides Pydantic request/response models |
-| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Pydantic request/response schemas implemented; routes, dependency wiring and persistence scaffolded (M6) |
+| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Application factory, dependency providers, versioned health/readiness/model-metadata/single-prediction/batch-prediction/history/review routes, Pydantic contracts, per-item batch errors, request/batch limits, CORS policy, safe error mapping, admin bearer-token auth and access logging implemented; dashboard and monitoring pending (M6) |
 | 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Scaffolded |
 | 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, drift history. Talks to the API/DB, never to model internals. | Scaffolded |
 | 8 | Monitoring | `src/fraud_risk/monitoring/` | Drift detection on inputs and scores, delayed-label performance tracking, report persistence. | Scaffolded |
@@ -145,7 +148,7 @@ not create an import cycle with training or configuration.
 
 ### Online (inference)
 
-1. Client `POST /predict` with a transaction JSON body (Pydantic-validated).
+1. Client `POST /api/v1/predict` with a transaction JSON body (Pydantic-validated).
 2. The API resolves the configured artifact path (registry aliases are still M5 work) and
    asks the process-wide `models.inference.FraudInferenceService` to load it once.
 3. Features are validated against the bundle's exact names and order, then passed to the
@@ -154,11 +157,43 @@ not create an import cycle with training or configuration.
 4. The service calls the fitted `predict_proba`, applies the bundle's binary threshold and,
    when requested, returns SHAP top-k contributions. The three-way review/block policy is
    still an API-layer concern (§6).
-5. One row is persisted to `predictions`, the explanation included as JSONB, then the
-   response is returned.
+5. The API persists the returned score, threshold, model identity and binary decision through
+   a session-scoped repository. The raw feature snapshot is stored only when
+   `PERSIST_FEATURE_SNAPSHOT=true`; prediction history is readable by prediction id.
 
-**Persistence is not the caller's job.** The API records what it returned, so the dashboard
-and drift monitor always describe real traffic.
+**Implemented HTTP surface (M6, partial).** All routes are mounted under
+`Settings.api_prefix` (default `/api/v1`): `GET /health` (liveness only), `GET /ready`
+(attempts to load and validate the artifact; `200` ready, `503` not ready), `GET /model`
+(admin-only: model name/version/SHA/family/threshold/feature schema), `POST /predict` (one
+transaction), `POST /predict/batch` (a bounded list), `GET /predictions/{id}` (admin-only
+history) and `PATCH /predictions/{id}/review` (admin-only analyst review). Each successful
+prediction carries the model identity, probability, applied threshold, raw binary `prediction`
+and a human-readable `decision`. Batch items are validated independently: a malformed
+transaction produces a safe error at its own index while valid items are still scored. The
+batch item count is capped by `BATCH_MAX_SIZE`, and an ASGI middleware enforces
+`API_MAX_REQUEST_BYTES` before JSON parsing. Model loading, scoring and repository calls run in
+Starlette's thread pool behind async handlers. Model failures are logged server-side and
+returned as a non-leaking `503 {"detail": "model unavailable"}`.
+
+**Access model.** Health, readiness and scoring are public. Readiness reports availability only,
+not model identity or the feature schema. Model metadata, prediction history and review
+operations require `Authorization: Bearer <API_ADMIN_TOKEN>`. If the token is unset, those
+routes fail closed with `503 {"detail": "administrative API is not configured"}`; they never
+become anonymous. A missing/wrong credential returns `401` with `WWW-Authenticate: Bearer`.
+This is a single shared administrative token, not per-user identity or role-based authorization.
+`/docs` and `/openapi.json` are available locally but disabled when `APP_ENV=production`;
+ReDoc and debug mode are always disabled. CORS is an exact-origin allow-list from
+`CORS_ALLOWED_ORIGINS`, without credentials; `Authorization` and `PATCH` are allowed, and a
+wildcard is rejected outside `local`/`test`.
+
+**Persistence is the API's job, not the caller's.** The API records what it returned, so the
+dashboard and drift monitor describe real traffic. The production database schema is owned by
+Alembic; the application never calls `metadata.create_all()`. Repository writes commit once per
+unit of work and roll back on `SQLAlchemyError`; the request-scoped session dependency also
+rolls back and always closes. Access logs record method, path, status and duration only; they
+never record query strings, headers, bearer tokens or request bodies. Validation details never
+echo the submitted feature values, and unexpected failures return
+`500 {"detail": "internal server error"}` without a traceback or filesystem path.
 
 ---
 
@@ -192,16 +227,20 @@ presence on an inference payload as a validation error.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `prediction_id` | `uuid` | Primary key. |
-| `transaction_id` | `str` | Natural key, unique index (idempotent scoring). |
+| `prediction_id` | `uuid` | Primary key, generated by the repository. |
+| `transaction_id` | `str` (128) | Indexed natural key. Uniqueness/idempotency is **not** enforced by the database yet. |
 | `created_at` | `timestamptz` | Server time, UTC. |
-| `score` | `double` | Calibrated probability in `[0, 1]`. |
-| `decision` | `enum` | `allow` \| `review` \| `block`. |
-| `thresholds` | `jsonb` | The `review`/`block` thresholds in force at scoring time. |
-| `model_name`, `model_version`, `mlflow_run_id` | `str` | Full traceability from a row back to a run. |
-| `explanation` | `jsonb` | Top-k SHAP contributions (`[{feature, value, contribution}]`). |
-| `feature_snapshot` | `jsonb` (nullable) | Inputs used, for drift analysis. Configurable, off by default in production. |
-| `latency_ms` | `double` | Scoring latency. |
+| `model_version`, `model_sha256` | `str` | Model identity at scoring time. |
+| `risk_score` | `double` | Calibrated probability in `[0, 1]`. |
+| `threshold` | `double` | The binary decision threshold applied at scoring time. |
+| `decision` | `enum` | `legitimate` \| `fraud` (the model's binary decision). |
+| `review_status` | `enum` | `pending` \| `confirmed_fraud` \| `confirmed_legitimate`. |
+| `feature_snapshot` | `jsonb` (nullable) | Inputs used, only when `PERSIST_FEATURE_SNAPSHOT=true`; off by default. Never contains a PAN or account reference. |
+
+The richer three-way review/block policy, per-prediction explanations, latency and feedback
+labels are documented design targets but are **not** in the current `predictions` schema. The
+three-way thresholds are currently configuration/reporting concepts; the persisted decision is
+binary.
 
 ### 5.3 Tables
 
@@ -394,8 +433,8 @@ first request.
   for the selected XGBoost bundle; unsupported families fail loudly rather than returning a
   different output.
 - **API-facing types.** `api.schemas.PredictionRequest` / `PredictionResponse` are Pydantic v2
-  models ready for FastAPI routes. They reject label fields and unknown fields, constrain the
-  amount and probability ranges, and expose no feature snapshot.
+  models used by the versioned FastAPI routes. They reject label fields and unknown fields,
+  constrain the amount and probability ranges, and expose no feature snapshot.
 
 ---
 
@@ -511,8 +550,12 @@ tests are fixed or deleted, never retried.
    `champion`. *Blocks M5.*
 4. **Feature snapshot policy.** Whether to persist raw inputs by default (storage + privacy
    cost vs. drift-analysis value). *Blocks M6.*
-5. **Auth on the API.** Out of scope for the PoC; must be decided before any exposure beyond
-   localhost. *Blocks M9.*
+5. **Auth on the API.** ✅ **Resolved for the current scope.** Health, readiness and scoring
+   are public; model metadata, prediction history and review require a single administrative
+   bearer token from `API_ADMIN_TOKEN`. The routes fail closed when it is unset. This is not a
+   complete identity/authorization system: there is no per-user identity, role model, token
+   rotation, rate limiting or audit trail beyond access logs. Those remain required before
+   exposing scoring to untrusted clients or the review workflow to multiple analysts.
 
 ---
 
@@ -537,7 +580,7 @@ boundary: anything the serving path imports at request time must be in `dependen
 | `sqlalchemy`, `alembic`, `psycopg[binary]` | core | Persistence and migrations (D10). |
 | `streamlit`, `plotly` | core | The dashboard command of the same image (§10). |
 | `evidently` | extra `monitoring` | Rich report rendering only. The drift *decision* is first-party so thresholds stay testable and version-controlled (D8). |
-| `pytest`, `pytest-cov`, `httpx`, `ruff`, `mypy`, `packaging`, `pandas-stubs`, `matplotlib` | extra `dev` | Never imported by `src/`. `httpx` is required by FastAPI's `TestClient`; `packaging` is used by the environment smoke test to verify installed versions against the declared ranges. `pandas-stubs` exists because pandas ships no inline types: without it `mypy --strict` treats every `DataFrame` as `Any`, which would make the data layer's annotations decorative. `matplotlib` renders the EDA figures from `notebooks/eda.py`; it stays out of `dependencies` because no module under `src/` may import a plotting library (AGENTS.md §2), which also keeps the serving image free of it. |
+| `pytest`, `pytest-cov`, `httpx`, `ruff`, `mypy`, `packaging`, `pandas-stubs`, `matplotlib` | extra `dev` | Never imported by `src/`. `httpx` drives the API tests through `httpx.ASGITransport`; `packaging` is used by the environment smoke test to verify installed versions against the declared ranges. `pandas-stubs` exists because pandas ships no inline types: without it `mypy --strict` treats every `DataFrame` as `Any`, which would make the data layer's annotations decorative. `matplotlib` renders the EDA figures from `notebooks/eda.py`; it stays out of `dependencies` because no module under `src/` may import a plotting library (AGENTS.md §2), which also keeps the serving image free of it. |
 
 **Invariants:** nothing in `dependencies` is used only by an extra; nothing in an extra is
 imported by `src/fraud_risk/`.

@@ -1,13 +1,15 @@
 """Database layer (architecture area 6).
 
 Responsibility
-    SQLAlchemy 2.x models, engine/session lifecycle, and Alembic migrations.
-
-Notes
-    ``migrations/`` is created by ``alembic init`` in milestone M2 rather than being
-    hand-written here, so the generated ``env.py`` and ``script.py.mako`` match the Alembic
-    version actually installed.
+    SQLAlchemy 2.x models, engine/session lifecycle, repository operations and Alembic
+    migrations.
 
 Status
-    Scaffolding only. See ``docs/ROADMAP.md`` (M2).
+    The ``predictions`` table, session factory and API write path are implemented. Feedback
+    labels and drift reports remain later milestones. Alembic owns the schema; no application
+    code calls ``metadata.create_all()``.
 """
+
+from __future__ import annotations
+
+__all__: list[str] = []

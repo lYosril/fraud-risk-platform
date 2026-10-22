@@ -1,6 +1,8 @@
 """FastAPI application (architecture area 5).
 
 Status
-    Request/response schemas are implemented and ready for FastAPI; routes, dependency wiring
-    and persistence are scaffolding. See ``docs/ROADMAP.md`` (M6).
+    The application factory, dependency wiring, versioned health/readiness/model-metadata,
+    single-prediction and batch-prediction routes, request/batch limits, CORS policy and HTTP
+    error mapping are implemented. Prediction persistence and the read-back/feedback routes
+    remain M6 work; see ``docs/ROADMAP.md``.
 """

@@ -13,5 +13,6 @@ Rules
     - Explanations are computed per request, not by sweeping the dataset.
 
 Status
-    Scaffolding only. See ``docs/ROADMAP.md`` (M5).
+    Scaffolding only. The XGBoost SHAP core is implemented in ``models.explainability``; this
+    module will wire it into the cached serving path. See ``docs/ROADMAP.md`` (M5).
 """

@@ -1,15 +1,18 @@
-# Implementation Roadmap
+﻿# Implementation Roadmap
 
 Milestones are ordered so that each one is independently demonstrable and no milestone
-depends on an unfinished later one. **M0 is complete. M1 is in progress (dataset acquisition
-and data card only); M2–M9 are not started.**
+depends on an unfinished later one. **M0, M1 and M3 are complete. M4 is implemented for the
+comparison, frozen final-evaluation path and one real MLflow-tracked run, but still lacks a
+two-run history, stratified CV and the reliability/Brier comparison. M5 is in progress: the
+bundle contract and XGBoost SHAP layer are implemented; registry, serving inference and the
+promotion gate are not. M2 and M6â€”M9 are not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
-because code exists — it is done when its exit criteria pass and the evidence is recorded.
+because code exists â€” it is done when its exit criteria pass and the evidence is recorded.
 
 ---
 
-## M0 — Repository foundation ✅ *complete*
+## M0 â€” Repository foundation âœ… *complete*
 
 **Deliverables**
 
@@ -35,28 +38,28 @@ because code exists — it is done when its exit criteria pass and the evidence 
       `artifacts/*` are ignored while the `.gitkeep` placeholders are tracked.
 - [x] The documented light setup path works (`9 passed, 25 deselected` with only
       `pydantic-settings packaging pytest ruff mypy` installed).
-- [ ] CI workflow executed at least once on GitHub — *not run yet; the workflow file has
+- [ ] CI workflow executed at least once on GitHub â€” *not run yet; the workflow file has
       never been pushed.*
 
 ---
 
-## M1 — Data ingestion and validation
+## M1 â€” Data ingestion and validation
 
 **Deliverables**
 
-- **Dataset decided and documented** (ARCHITECTURE §13.1 resolved): data card in
+- **Dataset decided and documented** (ARCHITECTURE Â§13.1 resolved): data card in
   `docs/DATA_CARD.md`, operator workflow in `data/README.md`, and
   `python -m fraud_risk.data` for presence, header, column and row-width checking.
-- `data.ingestion` — **loading done**: `load_csv` returns the file as stored (no coercion,
+- `data.ingestion` â€” **loading done**: `load_csv` returns the file as stored (no coercion,
   no cleaning) and raises typed errors for missing, empty, non-UTF-8, duplicate-header and
   ragged files. The dataset fingerprint (hash + row count + time range) is still pending.
-- `data.validation` — **contract done**: required columns, duplicate column names, empty
+- `data.validation` â€” **contract done**: required columns, duplicate column names, empty
   data, per-column null counts, numeric/finite non-target columns, and `Class` restricted
   to `0`/`1`, plus a report of row/feature/missing/duplicate/class counts and proportions.
   Typed errors live in `data.errors`. Value-range checks are not implemented yet, and the
   inference-side leakage guard (`is_fraud` must not reach the inference path) is still
   pending (M6).
-- CLI entry point — **done**: `python -m fraud_risk.data` now runs the contract check after
+- CLI entry point â€” **done**: `python -m fraud_risk.data` now runs the contract check after
   the presence/shape check, so a failure is reproducible from the command line.
 - **Unit tests done** for every rule above, including the failure cases
   (`tests/test_ingestion.py`, `tests/test_validation.py`).
@@ -73,7 +76,7 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M2 — Persistence layer
+## M2 â€” Persistence layer
 
 **Deliverables**
 
@@ -93,24 +96,24 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M3 — Exploratory analysis and feature engineering
+## M3 â€” Exploratory analysis and feature engineering
 
 **Deliverables**
 
-- EDA — **done**: `notebooks/eda.py` loads the file through the ingestion/validation layer,
+- EDA â€” **done**: `notebooks/eda.py` loads the file through the ingestion/validation layer,
   takes every number from `features.eda`, and writes `summary.md`, `summary.json`, four CSV
   tables and six figures to the git-ignored `reports/eda/`. A script rather than a notebook so
   the tests execute it end to end. It covers shape/schema, duplicates, missing values, class
   balance, `Amount`, `Time`, per-feature statistics, feature/target associations, and the
   limitations and leakage risks. A non-reference input is labelled synthetic or custom in every
   artefact. No transform is fitted at this stage.
-- `features.engineering`: one reusable `ColumnTransformer` producing the model matrix —
+- `features.engineering`: one reusable `ColumnTransformer` producing the model matrix â€”
   **done**: `V1..V28` + `Amount`, `Time` and `Class` excluded with the reasons in the schema,
   raw values for tree models and a training-fitted `StandardScaler` for linear ones.
-- Leakage controls that are unit-tested, not just documented — **done** for the split and the
+- Leakage controls that are unit-tested, not just documented â€” **done** for the split and the
   transform: disjointness, timestamp-boundary integrity, label separation, and training-only
   fitting statistics.
-- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3) —
+- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3) â€”
   **pending**, delivered with the artifact registry in M5.
 - Early precision/recall expectations move to M4: they require a trained, calibrated model,
   and no number may be invented before one exists.
@@ -131,33 +134,64 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M4 — Model training and evaluation
+## M4 â€” Model training and evaluation
 
 **Deliverables**
 
-- `models.splitting` — **done** (delivered with the preprocessing stage): temporal 60/20/20
+- `models.splitting` â€” **done** (delivered with the preprocessing stage): temporal 60/20/20
   split (default for the time-ordered file, boundaries pushed to the next distinct second) and
   a seed-reproducible stratified alternative, plus a ~2.5 KB split record with no row-level
   values.
-- `models.training`: stratified CV, class-imbalance handling, candidate comparison
-  (logistic-regression baseline, random forest, XGBoost), probability calibration.
-- `models.evaluation`: PR-AUC first, recall/precision at operating points, ROC-AUC,
-  calibration curve, confusion matrix at the tuned thresholds, business-cost sweep,
-  error analysis.
-- MLflow logging of params, metrics, artifacts, dataset fingerprint, git revision, and the
-  split definition.
+- `models.training` â€” **done**: a bounded grid of calibrated logistic regression, random
+  forest and
+  XGBoost candidates on the shared feature pipeline; training-only class reweighting
+  (`class_weight` / `scale_pos_weight`); each threshold chosen on validation expected cost;
+  the winner selected on that cost (ties by validation PR-AUC) and the test split scored once;
+  local `model.joblib` / `comparison.json` / `metrics.json` / `run.json` artifacts. Remaining:
+  stratified CV, the reliability/Brier calibration comparison, and a second comparable MLflow
+  run (one real run exists; it is not yet a history).
+- `fraud_risk.tracking` â€” **done**: configurable MLflow URI/experiment, a deterministic
+  `run_fingerprint` over seed/split/schema/config/git revision, params/tags/metrics/artifacts,
+  and explicit `FAILED` status with failure tags when training raises. The four local files are
+  logged as artifacts; no model is logged, registered or deployed by training.
+- `models.evaluation` â€” **done**: precision, recall, F1, confusion matrix, PR-AUC,
+  ROC-AUC, false-positive rate, alert count/rate, per-class metrics, the majority-class
+  baseline, the validation-only cost-optimal threshold rule and the explicit separation of
+  probabilities from binary decisions, with the cost impact of false negatives versus false
+  positives. Also **done**: validation-only `MinRecallPolicy` and `AlertCapacityPolicy`
+  (absolute alert count or share of rows), with deterministic tie-breaking and tied-score
+  groups never split. Remaining: reliability curve / Brier score, the calibration comparison,
+  richer error analysis and the three-way review/block operating points.
+- `models.final_evaluation` â€” **done**: consumes the comparison bundle, re-selects the
+  operating threshold on validation under expected cost, minimum recall or alert capacity,
+  copies the model and writes `decision.json` before test, then scores test once and writes
+  `metrics.json` / `run.json`. Probabilities and decisions are reported separately, and the
+  model SHA-256, policy, split, cost weights and library versions are recorded. This is a
+  repeat test evaluation because the comparison stage already scored the test split; the
+  split is therefore not a pristine holdout.
+- MLflow logging of params, metrics, artifacts, git revision and the split definition â€”
+  **done** for the training CLI. A dataset content fingerprint is still pending with the M1
+  data layer, so split-position digests and row counts are recorded instead of inventing one.
 
 **Exit criteria**
 
 - At least two real runs are visible in the MLflow UI with comparable metrics.
 - Reported metrics come from actual runs; the run id is recorded next to every number.
-- The threshold policy (ARCHITECTURE §6) is tuned on validation data and frozen with the model.
+- The threshold policy (ARCHITECTURE Â§6) is tuned on validation data and frozen with the model.
+
+The local comparison and final-evaluation artifacts satisfy the threshold-freezing criterion
+for a binary operating cut. The MLflow criterion is **partially met**: one real training run
+(`758f8670c78744159032d4fcabfff602`, experiment `fraud-detection`, status `FINISHED`) is in the
+local SQLite store, but there is no second comparable run and therefore no run history in the
+sense the criterion requires. The test split has been scored by the comparison stage and again
+by the final evaluation, so it cannot be used for further honest tuning. No model is
+registered by the tracking integration.
 
 **Depends on:** M2 (for the MLflow/Postgres option) and M3.
 
 ---
 
-## M5 — Artifact management and inference
+## M5 â€” Artifact management and inference
 
 **Deliverables**
 
@@ -165,8 +199,14 @@ because code exists — it is done when its exit criteria pass and the evidence 
   feature names, thresholds, metrics, git revision, training timestamp).
 - `models.registry`: publish a bundle, resolve a named alias (`champion`), list versions.
   MLflow registry aliases back this, with a filesystem store for the local PoC.
-- `models.inference`: lazy load + cache, `predict_one`, and SHAP explanations (§7).
-- Documented promotion gate (ARCHITECTURE §13.3).
+- `models.explainability` — **done for the selected XGBoost bundle**: cached
+  `shap.TreeExplainer` per calibration fold, additivity-checked pre-calibration tree-margin
+  contributions, global mean-absolute importance, top-k per-transaction explanations with
+  exact raw/model input values, strict JSON/CSV/Markdown reports and a plotting script under
+  the git-ignored `reports/explainability/`. Unsupported model families fail loudly. The
+  API-facing per-request path and the registry are still pending.
+- `models.inference`: lazy load + cache, `predict_one`, and SHAP explanations (Â§7).
+- Documented promotion gate (ARCHITECTURE Â§13.3).
 
 **Exit criteria**
 
@@ -174,17 +214,23 @@ because code exists — it is done when its exit criteria pass and the evidence 
 - Loading a *missing* bundle raises a clear error the API can turn into a 503.
 - Explanations are produced for a single transaction well within an interactive latency budget.
 
+**Status:** the explainability core and its offline report are implemented and tested against
+the selected XGBoost bundle. The registry, the cached serving entry point (`models.inference`),
+the API-facing per-request path and the promotion gate remain pending; the measured 11.4 ms
+median for one explanation excludes HTTP, persistence and the transaction's own feature
+construction.
+
 **Depends on:** M4.
 
 ---
 
-## M6 — FastAPI application
+## M6 â€” FastAPI application
 
 **Deliverables**
 
 - `api.main`: app factory, lifespan (load model once, dispose the engine on shutdown),
   structured logging with request ids.
-- `api.schemas`: Pydantic v2 request/response models mirroring the §5.2 contract; validation
+- `api.schemas`: Pydantic v2 request/response models mirroring the Â§5.2 contract; validation
   rejects label fields.
 - Routes: `GET /health` (process + model availability, reported separately), `POST /predict`,
   `GET /predictions/{id}`, `POST /feedback`.
@@ -207,7 +253,7 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M7 — Streamlit dashboard
+## M7 â€” Streamlit dashboard
 
 **Deliverables**
 
@@ -226,7 +272,7 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M8 — Monitoring
+## M8 â€” Monitoring
 
 **Deliverables**
 
@@ -247,20 +293,20 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 ---
 
-## M9 — CI/CD and containerised deployment
+## M9 â€” CI/CD and containerised deployment
 
 **Deliverables**
 
 - Multi-stage `Dockerfile` (one image, several commands) and application services in
   `docker-compose.yml` (api, dashboard, optional mlflow, postgres).
-- CI: lint → type-check → unit tests → integration tests against a PostgreSQL service
-  container → build image. Coverage reported, not used as a gate until it is meaningful.
+- CI: lint â†’ type-check â†’ unit tests â†’ integration tests against a PostgreSQL service
+  container â†’ build image. Coverage reported, not used as a gate until it is meaningful.
 - Deployment notes (reverse proxy, secrets injection, migration step on release).
 
 **Exit criteria**
 
 - `docker compose up --build` brings up a working stack from a clean clone (README-documented).
-- CI is green on a real commit — not just locally.
+- CI is green on a real commit â€” not just locally.
 - Secrets come from the environment at runtime; the image contains none.
 
 **Depends on:** M6, M7, M8.
@@ -271,7 +317,7 @@ because code exists — it is done when its exit criteria pass and the evidence 
 
 - Adopt a lock file (for example `uv.lock` or a `pip-compile`d constraints file) so CI and
   production resolve byte-identical dependency versions.
-- API authentication / API keys (ARCHITECTURE §13.5).
+- API authentication / API keys (ARCHITECTURE Â§13.5).
 - Model card per promoted version.
 - Batch scoring endpoint.
 - Automatic drift-triggered retraining (only after M8 has historical evidence).

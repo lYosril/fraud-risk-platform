@@ -1,4 +1,4 @@
-# Fraud Detection & Risk Intelligence Platform
+﻿# Fraud Detection & Risk Intelligence Platform
 
 An end-to-end machine learning platform that scores credit-card transactions for fraud risk,
 **explains every decision**, serves predictions over a REST API, persists the full prediction
@@ -10,30 +10,49 @@ and what does not.
 
 ---
 
-## ⚠️ Current status: foundation, data workflow, EDA and leakage-safe splitting complete; nothing trained or served
+## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation and SHAP explainability complete; nothing served
 
 **Milestone M0 (repository foundation) is complete, the Python 3.11 development environment
 is provisioned, the dataset workflow (acquisition, presence check and contract validation) is
-implemented, and the exploratory analysis, split and preprocessing stages are implemented.
-Nothing is trained, served or monitored yet.**
+implemented, and the exploratory analysis, split, preprocessing, model-comparison, frozen
+final-evaluation and SHAP explanation stages are implemented. A winning model artifact, a
+frozen binary operating decision and an explainability report exist locally; no API, dashboard
+or monitoring is served yet.**
 
-- There is **no trained model** in this repository, and **no model metrics are reported
-  anywhere**. Any number that appears in a design document is illustrative of a *metric
-  definition*, never a result.
+- **A real three-family comparison and a frozen final evaluation have been run** on the local
+  reference dataset (logistic regression, random forest, XGBoost). Their actual metrics are
+  written to the git-ignored `artifacts/comparison/` and `artifacts/final_evaluation/`
+  directories and quoted in the verification record below. They describe those runs and that
+  protocol only - they are not a promise about a future model. The training CLI now records one
+  real run in a local SQLite-backed MLflow store (see the tracking section and the verification
+  record); no model is registered or deployed by that step. The test split has now been scored
+  more than once, so it is not a pristine holdout; future tuning must use validation or a fresh
+  holdout.
 - `docs/ARCHITECTURE.md` describes the intended system. It is a design, not a description of
   working code.
 - Implemented and tested logic covers `fraud_risk.config.Settings` (configuration), the
   `fraud_risk.data` package: dataset presence and shape (`fraud_risk.data.dataset`), typed
   loading (`fraud_risk.data.ingestion`), the schema contract and summary report
   (`fraud_risk.data.validation`), the `python -m fraud_risk.data` command with its optional
-  Kaggle CLI acquisition — `fraud_risk.features.eda` plus the `notebooks/eda.py` script that
-  renders its report to the git-ignored `reports/eda/` — and the training-time entry points
-  `fraud_risk.features.engineering` (the shared `ColumnTransformer`) and
+  Kaggle CLI acquisition â€” `fraud_risk.features.eda` plus the `notebooks/eda.py` script that
+  renders its report to the git-ignored `reports/eda/` â€” the training-time entry points
+  `fraud_risk.features.engineering` (the shared `ColumnTransformer`),
   `fraud_risk.models.splitting` (temporal or stratified train/validation/test split plus a
-  compact, value-free split record).
+  compact, value-free split record), `fraud_risk.models.training` (the calibrated
+  logistic-regression / random-forest / XGBoost comparison, its local artifact bundle and
+  provenance), `fraud_risk.models.evaluation` (per-class metrics, the majority-class baseline,
+  the explicit probability/decision split and the validation-only expected-cost, minimum-recall
+  and alert-capacity policies), `fraud_risk.models.final_evaluation` (freeze the model and
+  threshold, then score test once), `fraud_risk.models.bundle` (the validated artifact-bundle
+  contract shared by final evaluation and explanations), `fraud_risk.models.explainability`
+  (SHAP TreeExplainer on the selected calibrated XGBoost, global mean-absolute importance and
+  per-transaction top-k contributions, rendered by `notebooks/explainability.py`) and
+  `fraud_risk.tracking` (the optional MLflow boundary: configurable tracking URI, deterministic
+  run fingerprint, parameter/tag/metric/artifact logging and explicit failed-run status; model
+  registration is a separate reviewed step and is not performed here).
 - All other modules are documented placeholders (see the status table below).
 - The dependency set is installed and importable, and `tests/test_smoke_imports.py` checks
-  that it stays that way — but no module that consumes those packages is implemented.
+  that it stays that way.
 
 No transaction data is included. The reference dataset is never committed: see
 [`data/README.md`](data/README.md) for the workflow and
@@ -62,13 +81,13 @@ No transaction data is included. The reference dataset is never committed: see
 
 ```
 raw data (data/raw, git-ignored)
-        │
-        ▼
-  data ingestion & validation ──► features (shared fitted transform) ──► model training
-                                                                              │  MLflow
-                                                                              ▼
-  client ──HTTP──► FastAPI ──► inference (+ SHAP) ──► PostgreSQL ◄── Streamlit dashboard
-                                                        ▲
+        â”‚
+        â–¼
+  data ingestion & validation â”€â”€â–º features (shared fitted transform) â”€â”€â–º model training
+                                                                              â”‚  MLflow
+                                                                              â–¼
+  client â”€â”€HTTPâ”€â”€â–º FastAPI â”€â”€â–º inference (+ SHAP) â”€â”€â–º PostgreSQL â—„â”€â”€ Streamlit dashboard
+                                                        â–²
                                               monitoring / drift reports
 ```
 
@@ -82,7 +101,7 @@ does not happen.
 | 0 | Configuration | `fraud_risk/config.py` | **Implemented** (settings + tests) |
 | 1 | Data ingestion & validation | `fraud_risk/data/` | Loading + contract validation **implemented**; fingerprint pending (M1) |
 | 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** (not yet serialised) |
-| 3 | Training & evaluation | `fraud_risk/models/splitting.py`, `training.py`, `evaluation.py` | Splitting **implemented**; training/evaluation scaffolded |
+| 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4); API inference wiring pending (M5) |
 | 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Scaffolded |
 | 5 | FastAPI application | `fraud_risk/api/` | Scaffolded |
 | 6 | Database layer | `fraud_risk/db/` | Scaffolded |
@@ -100,50 +119,53 @@ and exit criteria are in **[`docs/ROADMAP.md`](docs/ROADMAP.md)**.
 
 ```
 fraud-risk-platform/
-├── .env.example              # placeholder configuration only (commit this, not .env)
-├── .gitattributes            # line-ending normalisation
-├── .gitignore
-├── .github/workflows/ci.yml  # lint + type-check + tests (not executed yet)
-├── .python-version           # 3.11
-├── AGENTS.md                 # conventions for future work in this repo
-├── docker-compose.yml        # PostgreSQL only (app services arrive in M9)
-├── pyproject.toml            # the single dependency + tooling definition
-├── README.md
-├── artifacts/                # model artifact store (git-ignored, .gitkeep only)
-├── data/
-│   ├── README.md             # how to obtain the dataset and where to put it
-│   ├── raw/                  # source dataset  (git-ignored)
-│   ├── interim/              # intermediate data (git-ignored)
-│   ├── processed/            # model-ready data (git-ignored)
-│   └── sample/               # tiny synthetic fixtures (tracked)
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── DATA_CARD.md          # provenance, licence, schema, class imbalance
-│   └── ROADMAP.md
-├── notebooks/                # exploration only; never imported by src/
-│   └── eda.py                # reproducible EDA run: figures + summary under reports/
-├── reports/                  # generated analysis output (git-ignored)
-├── src/fraud_risk/
-│   ├── __init__.py           # __version__
-│   ├── config.py             # Settings — the only reader of environment variables
-│   ├── data/                 # dataset.py (spec/presence), ingestion.py (typed load),
-│   │                         # validation.py (contract + report), errors.py (typed errors)
-│   ├── features/             # eda, engineering (the shared fitted transform)
-│   ├── models/               # splitting (leakage-safe split), training, evaluation,
-│   │                         # registry, inference
-│   ├── db/                   # base, models, session (+ Alembic migrations in M2)
-│   ├── api/                  # main (app factory), schemas
-│   ├── dashboard/            # Streamlit app
-│   └── monitoring/           # drift
-└── tests/
-    ├── test_config.py          # configuration contract
-    ├── test_dataset.py         # dataset presence/shape check, acquisition guards
-    ├── test_ingestion.py       # typed CSV loading and its failure modes
-    ├── test_validation.py      # schema contract, report, CLI validation path
-    ├── test_eda.py             # EDA summaries + end-to-end script run
-    ├── test_engineering.py     # feature contract + training-only fitting
-    ├── test_splitting.py       # partition, determinism, schema, metadata, CLI
-    └── test_smoke_imports.py   # environment smoke test (declared / installed / importable)
+â”œâ”€â”€ .env.example              # placeholder configuration only (commit this, not .env)
+â”œâ”€â”€ .gitattributes            # line-ending normalisation
+â”œâ”€â”€ .gitignore
+â”œâ”€â”€ .github/workflows/ci.yml  # lint + type-check + tests (not executed yet)
+â”œâ”€â”€ .python-version           # 3.11
+â”œâ”€â”€ AGENTS.md                 # conventions for future work in this repo
+â”œâ”€â”€ docker-compose.yml        # PostgreSQL only (app services arrive in M9)
+â”œâ”€â”€ pyproject.toml            # the single dependency + tooling definition
+â”œâ”€â”€ README.md
+â”œâ”€â”€ artifacts/                # model artifact store (git-ignored, .gitkeep only)
+â”œâ”€â”€ data/
+â”‚   â”œâ”€â”€ README.md             # how to obtain the dataset and where to put it
+â”‚   â”œâ”€â”€ raw/                  # source dataset  (git-ignored)
+â”‚   â”œâ”€â”€ interim/              # intermediate data (git-ignored)
+â”‚   â”œâ”€â”€ processed/            # model-ready data (git-ignored)
+â”‚   â””â”€â”€ sample/               # tiny synthetic fixtures (tracked)
+â”œâ”€â”€ docs/
+â”‚   â”œâ”€â”€ ARCHITECTURE.md
+â”‚   â”œâ”€â”€ DATA_CARD.md          # provenance, licence, schema, class imbalance
+â”‚   â””â”€â”€ ROADMAP.md
+â”œâ”€â”€ notebooks/                # exploration only; never imported by src/
+â”‚   â””â”€â”€ eda.py                # reproducible EDA run: figures + summary under reports/
+â”œâ”€â”€ reports/                  # generated analysis output (git-ignored)
+â”œâ”€â”€ src/fraud_risk/
+â”‚   â”œâ”€â”€ __init__.py           # __version__
+â”‚   â”œâ”€â”€ config.py             # Settings â€” the only reader of environment variables
+â”‚   â”œâ”€â”€ data/                 # dataset.py (spec/presence), ingestion.py (typed load),
+â”‚   â”‚                         # validation.py (contract + report), errors.py (typed errors)
+â”‚   â”œâ”€â”€ features/             # eda, engineering (the shared fitted transform)
+â”‚   â”œâ”€â”€ models/               # splitting (leakage-safe split), training, evaluation,
+â”‚   â”‚                         # final_evaluation, registry, inference
+â”‚   â”œâ”€â”€ db/                   # base, models, session (+ Alembic migrations in M2)
+â”‚   â”œâ”€â”€ api/                  # main (app factory), schemas
+â”‚   â”œâ”€â”€ dashboard/            # Streamlit app
+â”‚   â””â”€â”€ monitoring/           # drift
+â””â”€â”€ tests/
+    â”œâ”€â”€ test_config.py          # configuration contract
+    â”œâ”€â”€ test_dataset.py         # dataset presence/shape check, acquisition guards
+    â”œâ”€â”€ test_ingestion.py       # typed CSV loading and its failure modes
+    â”œâ”€â”€ test_validation.py      # schema contract, report, CLI validation path
+    â”œâ”€â”€ test_eda.py             # EDA summaries + end-to-end script run
+    â”œâ”€â”€ test_engineering.py     # feature contract + training-only fitting
+    â”œâ”€â”€ test_splitting.py       # partition, determinism, schema, metadata, CLI
+    â”œâ”€â”€ test_evaluation.py      # metric definitions, per-class, majority baseline, cost threshold
+    â”œâ”€â”€ test_training.py        # three-family comparison, artifacts, provenance, test isolation
+    â”œâ”€â”€ test_final_evaluation.py # frozen decision, one test scoring, policy/CLI checks
+    â””â”€â”€ test_smoke_imports.py   # environment smoke test (declared / installed / importable)
 ```
 
 ---
@@ -158,19 +180,19 @@ fraud-risk-platform/
 | Git | 2.30+ | |
 
 No dataset is required to validate this repository or to run the test suite. The reference
-dataset — the public ULB credit-card fraud data, `creditcard.csv` — is documented in
+dataset â€” the public ULB credit-card fraud data, `creditcard.csv` â€” is documented in
 [`docs/DATA_CARD.md`](docs/DATA_CARD.md); obtaining it is optional (step 7).
 
 ### Getting Python 3.11
 
-**Windows** — install from [python.org](https://www.python.org/downloads/) (tick *Add
+**Windows** â€” install from [python.org](https://www.python.org/downloads/) (tick *Add
 python.exe to PATH*) or from the Microsoft Store, then confirm the launcher sees it:
 
 ```powershell
 py --list-paths          # should list -V:3.11
 ```
 
-**Debian / Ubuntu** — `venv` is a separate package, and this is the single most common
+**Debian / Ubuntu** â€” `venv` is a separate package, and this is the single most common
 Linux setup failure:
 
 ```bash
@@ -178,8 +200,8 @@ sudo apt update
 sudo apt install -y python3.11 python3.11-venv
 ```
 
-**Fedora / RHEL** — `sudo dnf install python3.11`.
-**macOS** — `brew install python@3.11`.
+**Fedora / RHEL** â€” `sudo dnf install python3.11`.
+**macOS** â€” `brew install python@3.11`.
 Otherwise, `pyenv install 3.11.9` works anywhere but is not required.
 
 > **Always invoke pip as `python -m pip`**, not bare `pip`. On every platform a stray `pip`
@@ -214,7 +236,7 @@ python3.11 -m pip --version
 ```
 
 The version string must start with `3.11`. If `py -3.11` or `python3.11` is not found, fix
-that first — installing into 3.12+ produces an environment that resolves different package
+that first â€” installing into 3.12+ produces an environment that resolves different package
 versions and does not match the supported target.
 
 ### 3. Create and activate a virtual environment
@@ -252,8 +274,8 @@ python -m pip install -e ".[dev]"
 packaging. Extras are additive: `pip install -e ".[dev,monitoring]"` also installs Evidently.
 
 Package versions are resolved from the compatible-release ranges in `pyproject.toml` rather
-than pinned to "whatever is newest" — see *Dependency layout* in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §14. The resolver legitimately picks
+than pinned to "whatever is newest" â€” see *Dependency layout* in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) Â§14. The resolver legitimately picks
 different versions on different interpreters (for example numpy 2.4.x on 3.11 where 2.5.x
 requires a newer Python), which is the intended behaviour.
 
@@ -280,7 +302,7 @@ docker compose up -d postgres
 docker compose ps
 ```
 
-Not required for the unit tests — the database is first used in milestone M2.
+Not required for the unit tests â€” the database is first used in milestone M2.
 
 ### 7. (Optional) Obtain the dataset
 
@@ -304,7 +326,7 @@ Only needed once a model is trained (M3 onward); the test suite never requires i
    offending column and reason are named).
 
 `python -m fraud_risk.data --download` drives the **official** Kaggle CLI instead, but only
-when it is installed and credentials are already configured — it never handles credentials
+when it is installed and credentials are already configured â€” it never handles credentials
 itself. Full instructions (including the synthetic fixture and all exit codes) are in
 [`data/README.md`](data/README.md); provenance, licence and known limitations are in
 [`docs/DATA_CARD.md`](docs/DATA_CARD.md).
@@ -315,7 +337,7 @@ itself. Full instructions (including the synthetic fixture and all exit codes) a
 
 Run these to verify the initial repository.
 
-### Fast path — no third-party ML dependencies required
+### Fast path â€” no third-party ML dependencies required
 
 ```bash
 py -3.11 -m venv .venv                 # PowerShell (then activate, see above)
@@ -331,7 +353,7 @@ mypy                                # strict typing
 pytest -q -m "not slow"             # unit tests; skips the environment smoke test
 ```
 
-### Full path — the real dependency set
+### Full path â€” the real dependency set
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -381,39 +403,225 @@ the temporal split but is not a model feature, `Amount` is left unscaled for tre
 standardised on training statistics for linear ones, and no resampler runs before the split.
 The reasoning is in `docs/ARCHITECTURE.md` section 6.
 
+### Training and comparing the models (requires the dataset)
+
+```bash
+# All three families, temporal split, validation selection, one test evaluation
+python -m fraud_risk.models.training
+
+# A single family, with an explicit artifact directory
+python -m fraud_risk.models.training --families logistic_regression \
+    --output-dir artifacts/comparison-logistic
+```
+
+The tracked 8-row `data/sample/creditcard.synthetic.csv` is a schema/CLI fixture, not a
+training set: its temporal validation split contains no fraud, so the CLI exits 1 by design.
+The test suite covers a full three-family comparison and the frozen final evaluation on
+generated 300-row fixtures instead; it never reads the real dataset.
+
+The protocol is identical for every family:
+
+- fit on `train` only, with a sigmoid calibrator fitted on internal training folds;
+- handle imbalance by training-only reweighting - `class_weight` for logistic regression and
+  random forest, `scale_pos_weight` from the training labels for XGBoost - with **no
+  resampling anywhere**;
+- choose each candidate's threshold on `validation` to minimise expected cost under
+  `FALSE_NEGATIVE_COST` / `FALSE_POSITIVE_COST` (default 100:1 cost units, a provisional
+  business assumption, not something the model tunes);
+- select the candidate with the lowest validation expected cost; ties break on validation
+  PR-AUC, and accuracy never participates;
+- freeze the winner and its threshold, then score `test` **once**.
+
+The grid is bounded: four logistic settings, two random forests (200 trees, depth 12) and two
+XGBoost settings (300 rounds, depth 6), each with three-fold calibration. `--n-jobs` controls
+tree parallelism and every candidate's fit time is recorded. On the reference machine the full
+comparison took 114 s.
+
+`artifacts/comparison/` (git-ignored) receives:
+
+| File | Contents |
+|------|----------|
+| `model.joblib` | the winning calibrated pipeline, exact threshold, feature columns, imbalance method and cost policy |
+| `comparison.json` | every candidate's parameters, imbalance setting, fit time, validation PR-AUC, cost-optimal threshold, expected cost and metrics |
+| `metrics.json` | validation and test at the frozen threshold: precision, recall, F1, confusion matrix, PR-AUC, ROC-AUC, FPR, per-class metrics and the cost impact of false negatives versus false positives, next to the majority-class baseline |
+| `run.json` | seed, feature schema, split record, grids, computational limits, imbalance derivation, library versions, git revision, timestamp, `run_fingerprint` and the MLflow run identity (or an explicit disabled record) |
+
+Accuracy appears only inside `accuracy_comparison`, next to the majority-class baseline. On
+the reference run the selected model is *less* accurate than "never fraud" (99.7876% versus
+99.8683%) while finding 80% of the frauds - which is exactly why it is not the criterion.
+
+### Tracking training runs locally with MLflow
+
+Tracking is enabled by default in the training CLI. The default local store is SQLite
+(`sqlite:///mlflow.db`), so no tracking server is required:
+
+```bash
+# Default: SQLite store at ./mlflow.db, experiment "fraud-detection"
+python -m fraud_risk.models.training
+
+# Inspect the runs in the MLflow UI
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+
+# A different experiment or a shared server
+python -m fraud_risk.models.training --experiment-name fraud-staging \
+    --tracking-uri http://localhost:5000
+
+# Offline run: write the local artifact bundle but skip MLflow entirely
+python -m fraud_risk.models.training --no-mlflow
+```
+
+`MLFLOW_TRACKING_URI` and `MLFLOW_EXPERIMENT_NAME` in `.env` are the persistent equivalents of
+`--tracking-uri` and `--experiment-name`. The run records the training configuration, split
+strategy/seed/fractions/position digests, feature schema digest, model family, validation and
+test metrics, and the four artifact files - never dataset rows, feature snapshots or
+credentials. `run_fingerprint` (a SHA-256 over the seed, split record, schema, configuration and
+git revision) is written into `run.json`, attached as an MLflow tag and used in the run name; it
+is the reproducible identifier, while MLflow still assigns its own `run_id`. A run that raises
+is marked `FAILED` with a failure-type/message tag before the original exception is re-raised.
+The trainer does **not** call `mlflow.log_model` or register a model: publication and promotion
+remain a separate reviewed step in M5.
+
+MLflow 3.x keeps the plain `./mlruns` filesystem backend in maintenance mode. If you need it,
+set `MLFLOW_ALLOW_FILE_STORE=true` in your own environment; the default here is SQLite.
+
+### Freezing the operating threshold and final test evaluation (requires the dataset)
+
+`fraud_risk.models.final_evaluation` does not retrain or re-select the model. It loads
+`artifacts/comparison/model.joblib`, recreates the recorded split, selects the threshold on
+**validation only**, copies the model and writes the decision **before** reading test labels,
+then scores `test` once:
+
+```bash
+# Reference policy: expected cost using the bundle's recorded 100:1 weights
+python -m fraud_risk.models.final_evaluation
+
+# Alternative operating policies; the model stays frozen, only the cut changes
+python -m fraud_risk.models.final_evaluation --policy min-recall --min-recall 0.80
+python -m fraud_risk.models.final_evaluation --policy alert-capacity --max-alert-rate 0.005
+python -m fraud_risk.models.final_evaluation --policy alert-capacity --max-alerts 300
+```
+
+The default split and feature schema come from `run.json` next to the bundle. If that record
+is absent, pass both `--strategy` and `--seed`; default 60/20/20 fractions and the bundle's
+feature columns are used. `--policy min-recall` maximises validation precision subject to the
+target, then prefers fewer alerts. `--policy alert-capacity` maximises validation recall within
+the capacity, then prefers higher precision and fewer alerts. Tied scores are never split, so an
+alert count can be below capacity. The test volume is reported, never used to re-tune the
+capacity.
+
+`artifacts/final_evaluation/` (git-ignored) receives:
+
+| File | Contents |
+|------|----------|
+| `decision.json` | the frozen decision, written before test: policy, exact threshold, validation metrics and alert count, model SHA-256, cost weights and validation split digest |
+| `frozen_model.joblib` | byte-identical copy of the bundle that was evaluated |
+| `metrics.json` | validation and test with separate probability summaries and binary decision summaries: precision, recall, F1, PR-AUC, ROC-AUC, FPR, confusion matrix, alert count/rate, per-class metrics, cost impact and majority baseline |
+| `run.json` | full split record, policy, model hash, cost weights, library versions, git revision, timestamp and an explicit statement that test was scored after the freeze |
+
+The model was selected under validation expected cost; a min-recall or capacity policy changes
+the operating cut but does not re-optimise the model. No threshold is universally optimal.
+The comparison stage already scored this test split, so the final report is a **repeat**
+evaluation, not an independent holdout; further tuning needs validation or a fresh split.
+
+### Explaining the frozen model with SHAP
+
+`fraud_risk.models.explainability` loads the bundle frozen by the final-evaluation stage and
+builds one `shap.TreeExplainer` per calibration fold. It writes global mean-absolute SHAP
+importance and a top-k explanation for one transaction; the plotting entry point lives
+outside the package because plotting imports are forbidden in `src/`:
+
+```bash
+# Default: artifacts/final_evaluation/frozen_model.joblib, validation split, row 0
+python notebooks/explainability.py
+
+# Explicit bundle, sample cap and row
+python notebooks/explainability.py \
+  --model artifacts/final_evaluation/frozen_model.joblib \
+  --path data/raw/creditcard.csv \
+  --max-rows 2000 --row 0 --top-k 10
+```
+
+`reports/explainability/` (git-ignored) receives `summary.md`, strict `summary.json`,
+`global_importance.csv/json`, `transaction_explanation.json`, `provenance.json` and two PNG
+figures. The report states the limits before the numbers.
+
+**What the explanation is:** an attribution to the fitted XGBoost tree margin **before** the
+sigmoid probability and the outer calibration. It is additive within that space
+(`base_value + contributions = tree_margin`), and the module checks that reconstruction. It
+is **not** additive in the final calibrated probability, not a probability-point change, and
+not the decision threshold. `raw_value` is the submitted value; `model_value` is the exact
+array after the bundle's fitted preprocessor (equal for the selected passthrough tree model).
+Positive values push the tree margin toward fraud; negative values push it away.
+
+**What it is not:** causal evidence. `V1..V28` are anonymous PCA components with no
+human-readable business meaning, correlated features share credit, and path-dependent Tree
+SHAP uses the fitted trees' cover rather than an interventional background sample. Global
+importance is an average absolute contribution, not model quality or a promotion gate.
+
+The implementation deliberately supports the selected **XGBoost** family only. A
+random-forest or logistic bundle raises a clear error instead of silently substituting a
+different explainer or output space. No probability or decision threshold is included in the
+explanation records.
+
 ### What to look for
 
 - `ruff format --check .` and `ruff check .` report no findings.
 - `mypy` reports `Success: no issues found` (strict mode).
-- `pytest -q` passes eight suites:
-  - `tests/test_config.py` — the configuration contract (version parity, secret-free
+- `pytest -q` passes twelve suites:
+  - `tests/test_config.py` â€” the configuration contract (version parity, secret-free
     defaults, DSN construction and percent-encoding, threshold validation, caching).
-  - `tests/test_dataset.py` — the dataset contract: the expected 31-column header,
+  - `tests/test_dataset.py` â€” the dataset contract: the expected 31-column header,
     missing/unexpected columns, empty and header-only files, malformed-row detection, the
     guarantee that no cell value is echoed, CLI exit codes, and the acquisition guards (no
     CLI, no credentials, a failed download, and a reported success with no file on disk).
     It uses only synthetic files and never contacts Kaggle.
-  - `tests/test_ingestion.py` — typed loading: missing/empty/non-UTF-8 files, duplicate
+  - `tests/test_ingestion.py` â€” typed loading: missing/empty/non-UTF-8 files, duplicate
     headers that pandas would silently rename, ragged rows that pandas would silently shift,
     and the guarantee that no value is coerced on the way in.
-  - `tests/test_validation.py` — the schema contract: duplicate columns, empty frames,
+  - `tests/test_validation.py` â€” the schema contract: duplicate columns, empty frames,
     missing columns, null counts per column, non-numeric/infinite/boolean columns, invalid
     labels, the summary report, the CLI failure path, and a subprocess check that importing
     the modules loads no data.
-  - `tests/test_eda.py` — the exploratory stage: computed dimensions, class balance,
+  - `tests/test_eda.py` â€” the exploratory stage: computed dimensions, class balance,
     duplicates, amount/time summaries, correlation ranking and the heavy-tail statistic; the
     typed validation gate on invalid input; a no-mutation guarantee; strict-JSON output; the
     synthetic and custom origin banners; and two end-to-end subprocess runs of
     `notebooks/eda.py` (fixture succeeds with six non-trivial PNGs, missing dataset exits 2).
-  - `tests/test_engineering.py` — the shared transform: the declared feature schema, the label
+  - `tests/test_engineering.py` â€” the shared transform: the declared feature schema, the label
     refused as a feature, non-numeric and missing values rejected, passthrough for tree models,
     and standardisation statistics proved to come from the training rows rather than the whole
     frame.
-  - `tests/test_splitting.py` — the split contract: every row in exactly one subset, a
+  - `tests/test_splitting.py` â€” the split contract: every row in exactly one subset, a
     chronological ordering, timestamp boundaries never divided, the stratified strategy's class
     rates, seed determinism, identical schemas, label separation, configuration validation, a
     value-free metadata record, and an end-to-end `python -m fraud_risk.models.splitting` run.
-  - `tests/test_smoke_imports.py` — the environment smoke test: every package the
+  - `tests/test_evaluation.py` â€” the metric definitions: hand-checked precision/recall/F1,
+    confusion counts, per-class metrics, the FPR denominator, threshold-free AUCs, the
+    majority-class trap, cost weights, alert counts, probability/decision separation, the
+    cost-optimal threshold rule (including its higher-recall tie-break and the "approve
+    everything" case), minimum-recall and alert-capacity policies, tied-score handling, and
+    typed rejection of malformed inputs.
+  - `tests/test_final_evaluation.py` â€” the frozen stage: the model and decision are written
+    before test, test is scored exactly once, corrupting test labels/features cannot change the
+    threshold or validation metrics, the frozen copy is byte-identical, policy/CLI validation,
+    and the metric/probability/decision records stay consistent.
+  - `tests/test_training.py` â€” the comparison: all three families fitted, selection by
+    validation expected cost rather than accuracy, a reloadable `model.joblib`, every required
+    metric plus per-class and cost-impact records, threshold freezing, reproducibility,
+    training-derived imbalance weights, computational limits, a deliberately corrupted test
+    split proving it never influences fitting or selection, CLI success/failure paths, and the
+    MLflow integration: a real SQLite-backed run with parameters, tags, metrics and artifacts,
+    an explicitly disabled-tracking record, and a failed fit marked `FAILED` with failure tags.
+  - `tests/test_tracking.py` — the tracking boundary: configuration from settings, blank-value
+    rejection, credential/query redaction, and the deterministic, input-sensitive run
+    fingerprint.
+  - `tests/test_explainability.py` — the SHAP layer: the selected XGBoost bundle loads,
+    unsupported families fail loudly, top-k contributions are ranked and additive in the
+    explained tree-margin space, displayed values equal the exact preprocessor inputs (also
+    for a scaled fixture), global importance is sorted and row-free, the report writer emits
+    strict JSON/CSV/Markdown, probability/threshold fields are absent from explanations, and
+    an end-to-end subprocess run writes two non-trivial PNGs from a synthetic fixture.
+  - `tests/test_smoke_imports.py` â€” the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
     (`ColumnTransformer`, `XGBClassifier`, `TreeExplainer`, `DeclarativeBase`,
@@ -423,24 +631,24 @@ The reasoning is in `docs/ARCHITECTURE.md` section 6.
 ### Verification record
 
 Last full check on the supported interpreter (Python 3.11.9, Windows). The Linux column is the
-last `python:3.11-slim` run (Python 3.11.17) and **predates the EDA and splitting stages**:
-Docker was not running when those changes were verified, so it was not re-run. Reproduce
-everything with the commands above — do not take it on trust.
+last `python:3.11-slim` run (Python 3.11.17) and **predates the EDA, splitting and modelling
+stages**: Docker was not running when those changes were verified, so it was not re-run.
+Reproduce everything with the commands above â€” do not take it on trust.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 42 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 51 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 36 source files | Success, 32 source files |
-| `pytest -q` | **212 passed** (4 third-party warnings) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 45 source files | Success, 32 source files |
+| `pytest -q` | **305 passed** (5 third-party warnings, 70.67 s) | **138 passed** (same warnings) |
 
 Tool versions: ruff 0.17.1, mypy 2.4.0, pytest 9.1.1, pandas-stubs 2.3.3.260113, pip 26.2.1.
 The container run used a clean venv and `pip install -e ".[dev]"`.
 
 **Dataset check verified end to end:** `python -m fraud_risk.data --path
-data/sample/creditcard.synthetic.csv` runs both stages — `OK`, 8 data rows, 31 columns, then
+data/sample/creditcard.synthetic.csv` runs both stages â€” `OK`, 8 data rows, 31 columns, then
 `Validation: OK` with 8 rows, 30 features, 0 missing values, 0 duplicate rows, `class 0 = 6`
-and `class 1 = 2` — and exits 0. A CSV whose `Class` contains a `2` exits 1 with
+and `class 1 = 2` â€” and exits 0. A CSV whose `Class` contains a `2` exits 1 with
 `InvalidTargetError` naming the column, and the output never contains a `Validation: OK` line.
 With no dataset present, `python -m fraud_risk.data` reports `MISSING` and exits 2. The real
 dataset was **not** downloaded for this check, so nothing above is a claim about it.
@@ -462,16 +670,122 @@ The same command with `--strategy stratified` produced 170,884 / 56,961 / 56,962
 `reports/splits/` (2.5 KB each, no feature values). The shared preprocessor was fitted on the
 training subset and transformed the validation subset to a 56,961 x 29 matrix.
 
+**Three-family comparison also run on the reference dataset** (never committed).
+`python -m fraud_risk.models.training` (temporal split, seed 42, 114 s wall clock on all
+cores) fitted eight candidates and selected on validation expected cost with the provisional
+100:1 policy. Every column except `Fit` is a validation metric:
+
+| Candidate (sorted by validation cost) | PR-AUC | Cost units | Threshold | Precision | Recall | F1 | FPR | Fit |
+|---------------------------------------|--------|-----------|-----------|-----------|--------|----|-----|-----|
+| `xgboost:scale_pos_weight=473.6889` | 0.7931 | **1,016** | 0.000389 | 0.2927 | 0.8421 | 0.4344 | 0.002039 | 6.9 s |
+| `random_forest:class_weight=balanced_subsample` | 0.7628 | 1,185 | 0.001836 | 0.3511 | 0.8070 | 0.4894 | 0.001494 | 34.5 s |
+| `random_forest:class_weight=None` | 0.7559 | 1,197 | 0.000824 | 0.3217 | 0.8070 | 0.4600 | 0.001705 | 51.6 s |
+| `logistic_regression:class_weight=balanced,C=1.0` | 0.7419 | 1,208 | 0.010008 | 0.1843 | 0.8246 | 0.3013 | 0.003655 | 1.8 s |
+| `xgboost:scale_pos_weight=1.0` | 0.7737 | 1,210 | 0.000444 | 0.2949 | 0.8070 | 0.4319 | 0.001933 | 8.5 s |
+| `logistic_regression:class_weight=None,C=1.0` | 0.5175 | 1,211 | 0.023099 | 0.1822 | 0.8246 | 0.2984 | 0.003708 | 1.0 s |
+| `logistic_regression:class_weight=balanced,C=0.1` | 0.7334 | 1,221 | 0.011141 | 0.1754 | 0.8246 | 0.2892 | 0.003884 | 1.5 s |
+| `logistic_regression:class_weight=None,C=0.1` | 0.5501 | 1,230 | 0.024187 | 0.1697 | 0.8246 | 0.2814 | 0.004042 | 1.0 s |
+
+PR-AUC and expected cost do not rank identically: the unweighted logistic model has the
+weakest ranking (AP 0.5175, still far above the 0.001 prevalence baseline) yet a competitive
+cost (1,211), because its threshold flags broadly. The documented criterion is cost; PR-AUC only breaks cost ties. Here the winner
+leads both. The winner was XGBoost with `scale_pos_weight=473.6889` (170,528 training
+negatives / 360 training positives) and a frozen threshold of
+`0.00038929328712573435`:
+
+| Split | Precision | Recall | F1 | PR-AUC | ROC-AUC | FPR | Confusion (TN, FP / FN, TP) |
+|-------|-----------|--------|----|--------|---------|-----|-----------------------------|
+| validation (selection) | 0.2927 | 0.8421 | 0.4344 | 0.7931 | 0.9822 | 0.002039 | 56,788 / 116 Â· 9 / 48 |
+| test (frozen, once) | 0.3614 | 0.8000 | 0.4979 | 0.8002 | 0.9801 | 0.001863 | 56,777 / 106 Â· 15 / 60 |
+| test majority class | 0.0000 | 0.0000 | 0.0000 | 0.0013 | 0.5000 | 0.000000 | 56,883 / 0 Â· 75 / 0 |
+
+Per-class (test): fraud precision 0.3614, recall 0.8000, F1 0.4979 (support 75); legitimate
+precision 0.9997, recall 0.9981, F1 0.9989 (support 56,883). At the assumed weights the test
+errors cost 1,606 units: 15 false negatives x 100 = 1,500 (missed fraud, loss or chargeback,
+never reviewed) plus 106 false positives x 1 = 106 (analyst review and customer friction).
+Validation cost was 1,016 (9 false negatives, 116 false positives). The absolute threshold is
+a ranking cut, not a validated business probability: the reliability/Brier comparison is
+still M4 work, and reweighted XGBoost compresses its score scale. These are **one run's
+numbers on one temporal split** - the test cost is 58% above validation cost, ordinary
+out-of-sample variation with only 57-75 frauds, not a measured gain over another run. The run
+was repeated once after an artifact-format change; the test metrics were identical, and no
+test result entered selection. The earlier baseline, the comparison stage and the frozen final
+evaluation have all scored this split, so it is no longer a pristine holdout; future tuning
+must use validation or a fresh holdout. The final-evaluation stage performed exactly one new
+test scoring pass, after writing its decision. Seeds are fixed, but tree parallelism changes
+floating-point summation order: bit-exact replication of these numbers on another machine or
+thread count requires `--n-jobs 1`. The 100:1 weights are provisional
+(`ARCHITECTURE.md` section 13.2); changing them re-ranks the grid.
+
+Artifacts: `model.joblib` (1.6 MB), `comparison.json` (20 KB), `metrics.json` (5.3 KB) and
+`run.json` (schema 3, including the tracking block), all git-ignored; the bundle was reloaded in
+a separate process. The tracking-enabled rerun on the same temporal split completed in 104.3 s
+of total candidate fit time and wrote real MLflow run
+`758f8670c78744159032d4fcabfff602` to experiment `fraud-detection` in the local SQLite store.
+Its status is `FINISHED`, its deterministic fingerprint is
+`6572a635b3c8ea41f933f67f90d00db285246e6f4d8dc9b74a067de2fddc8521`, and the run has the four
+artifact files plus the parameters, tags and metrics described above. `MlflowClient` listed no
+registered models, which is the intended separation: tracking does not register or deploy. This
+is **one real tracking run**, not a historical series; the earlier comparison run predates
+tracking, so do not read it as a two-run comparison.
+
+**Frozen final evaluation also run on the reference dataset.** The command
+`python -m fraud_risk.models.final_evaluation` (default expected-cost policy; 6 s wall clock) recreated
+the temporal split, selected the threshold on validation only, wrote `decision.json` and a
+byte-identical `frozen_model.joblib`, then scored test once. It reproduced the comparison's
+threshold (`0.00038929328712573435`) and test metrics exactly - the expected reproducibility
+result, not an independent new sample. The model SHA-256 is
+`e43c600bf6560e6334e3f5efc2667b5d19d5f14dd0e71cfd55bba252518743c9`; `run.json` records the
+decision file's SHA-256
+(`feaeaa6e541fdbb45bee81602e818d5a4586deba3953e8515a391a4534c3f0c4`). Validation had 164
+alerts (0.2879%), test 166 (0.2914%). The cost impact remains
+1,016 validation units and 1,606 test units; the test split is still the same 56,958 rows
+(56,883 legitimate / 75 fraud). `run.json` records `git_revision = ecb5fdb`; the worktree was
+dirty at run time, so this is not commit-exact provenance until the changes are committed and
+the command is rerun.
+
+**SHAP explainability also run on the frozen model.** `python notebooks/explainability.py`
+(default `artifacts/final_evaluation/frozen_model.joblib`, validation split, 2,000 uniformly
+spaced rows, row 0, top 10) completed in 12.7 s wall clock in the latest run and wrote the six
+report/JSON/CSV files plus two PNGs under `reports/explainability/`. The bundle SHA-256 matched
+`e43c600bf6560e6334e3f5efc2667b5d19d5f14dd0e71cfd55bba252518743c9`. The global ranking on that
+sample was V4 (mean |SHAP| 2.7243), V14 (2.1458), V12 (1.4679), V11 (1.1810), V10 (1.0867);
+the explained row's base value was 3.5814 and averaged tree margin -13.0113, with additivity
+residual -3.9e-06. A loaded model explains one transaction in **11.4 ms median** (20 timed
+calls, max 12.0 ms; model load excluded). These are tree-margin attributions, not calibrated
+probability points and not the frozen threshold. The report is git-ignored; the individual
+section contains the top-k raw/model values for one row, which is why it must not be treated
+as a data export. The implementation supports the selected XGBoost family only and does not
+silently substitute an explainer for a different family.
+
+Alternative operating policies were inspected on **validation only**, as a check that the
+policy layer works. They were not scored on test:
+
+| Validation policy | Threshold | Precision | Recall | F1 | Alerts | FPR |
+|-------------------|-----------|-----------|--------|----|--------|-----|
+| expected cost (reference) | 0.00038929328712573435 | 0.2927 | 0.8421 | 0.4344 | 164 | 0.002039 |
+| minimum recall 0.80 | 0.0005363336500146721 | 0.4182 | 0.8070 | 0.5509 | 110 | 0.001125 |
+| minimum recall 0.85 | 0.0003464947237638509 | 0.0888 | 0.8596 | 0.1609 | 552 | 0.008839 |
+| capacity 0.5% (284 alerts) | 0.00038929328712573435 | 0.2927 | 0.8421 | 0.4344 | 164 | 0.002039 |
+| capacity 1% (569 alerts) | 0.0003464947237638509 | 0.0888 | 0.8596 | 0.1609 | 552 | 0.008839 |
+
+The 0.5% capacity is not binding, so it selects the same cut as expected cost. The jump from
+0.80 to 0.85 minimum recall shows a precision cliff: the reweighted XGBoost score scale is
+compressed, and the next cut that reaches 0.85 recall adds hundreds of false positives. This
+is why a policy must be chosen for a stated review objective, and why no threshold is
+universally optimal. Choosing among these rows by test performance would be test-set tuning;
+the reference final run used the pre-declared expected-cost policy only.
+
 Earlier, on the pre-3.11 scaffold: `git check-ignore` / `git add -A --dry-run` confirmed that
 datasets, model artifacts, `.env`, `mlruns/` and `.venv/` are ignored while the `.gitkeep`
 placeholders are tracked (git 2.46.2), and `docker compose config --quiet` exited 0
-(Docker 29.8.2). `reports/` is ignored as well — `git check-ignore -v` matches
+(Docker 29.8.2). `reports/` is ignored as well â€” `git check-ignore -v` matches
 `.gitignore:91:reports/` for a generated report and figure, and a full EDA run adds nothing to
 `git status`.
 
 **Light path verified for the pre-splitting tree:** in a separate venv containing only
 `pydantic-settings packaging pytest pandas` (all inside the declared ranges; no ML, API or
-dashboard stack), `pytest -q -m "not slow"` gave `130 passed, 2 skipped, 25 deselected` — the
+dashboard stack), `pytest -q -m "not slow"` gave `130 passed, 2 skipped, 25 deselected` â€” the
 configuration and data suites need none of the ML stack, and the two EDA script tests skipped
 because `matplotlib` is a dev-extra dependency. That run **predates** the engineering/splitting
 tests, which import scikit-learn and were therefore not re-run there. Deliberately *not*
@@ -494,7 +808,8 @@ Recorded honestly rather than implied to work:
 | `pytest -m integration` | No integration tests exist; they arrive with M2/M6. |
 | `docker compose up` application stack | Only PostgreSQL is defined; app services arrive in M9. |
 | CI being green | `.github/workflows/ci.yml` has never run on GitHub. |
-| Anything about model quality | No model has been trained, and no performance numbers are claimed. |
+| General model quality or production readiness | One temporal split has been scored; the test split is no longer a pristine holdout, there is only one real MLflow run (not a two-run history) and no reliability/Brier comparison, and the cost weights are provisional assumptions. The reported numbers describe this run, not a financial decision system. |
+| Linux/container re-verification of the modelling stages | Docker was unavailable; the recorded Linux column predates EDA, splitting, training and final evaluation. |
 
 ---
 
@@ -522,7 +837,7 @@ Recorded honestly rather than implied to work:
 | Document | Contents |
 |----------|----------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, data flow, data contracts, modelling and monitoring design, key decisions, open questions |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Milestones M0–M9 with deliverables and exit criteria |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Milestones M0â€“M9 with deliverables and exit criteria |
 | [`AGENTS.md`](AGENTS.md) | Conventions and rules for future contributors (human or automated) |
 
 ## License

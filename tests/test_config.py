@@ -52,6 +52,8 @@ CONFIG_ENV_VARS = (
     "MODEL_ALIAS",
     "MODEL_DIR",
     "RANDOM_SEED",
+    "FALSE_NEGATIVE_COST",
+    "FALSE_POSITIVE_COST",
     "REVIEW_THRESHOLD",
     "BLOCK_THRESHOLD",
     "PERSIST_FEATURE_SNAPSHOT",
@@ -117,7 +119,7 @@ def test_defaults_point_nowhere_real(load_settings: Callable[..., Settings]) -> 
     settings = load_settings()
 
     assert settings.postgres_host == "localhost"
-    assert settings.mlflow_tracking_uri == "./mlruns"  # local file store, no server
+    assert settings.mlflow_tracking_uri == "sqlite:///mlflow.db"  # local store, no server
     assert not settings.model_dir.is_absolute()
     assert settings.dashboard_api_url.startswith("http://localhost")
 
@@ -142,6 +144,21 @@ def test_random_seed_defaults_and_is_bounded(load_settings: Callable[..., Settin
         load_settings(random_seed=-1)
     with pytest.raises(ValidationError):
         load_settings(random_seed=2**32)
+
+
+def test_cost_weights_default_and_must_be_positive(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """The provisional training cost model is explicit configuration, never a code constant."""
+    settings = load_settings()
+
+    assert settings.false_negative_cost == 100.0
+    assert settings.false_positive_cost == 1.0
+
+    with pytest.raises(ValidationError):
+        load_settings(false_negative_cost=0)
+    with pytest.raises(ValidationError):
+        load_settings(false_positive_cost=-1)
 
 
 def test_required_settings_are_all_present(load_settings: Callable[..., Settings]) -> None:
@@ -180,6 +197,8 @@ def test_environment_variables_override_defaults(
     monkeypatch.setenv("MODEL_NAME", "fraud-risk-classifier-staging")
     monkeypatch.setenv("MODEL_ALIAS", "challenger")
     monkeypatch.setenv("MODEL_DIR", "/srv/models")
+    monkeypatch.setenv("FALSE_NEGATIVE_COST", "50")
+    monkeypatch.setenv("FALSE_POSITIVE_COST", "2.5")
     monkeypatch.setenv("REVIEW_THRESHOLD", "0.2")
     monkeypatch.setenv("BLOCK_THRESHOLD", "0.8")
     monkeypatch.setenv("PERSIST_FEATURE_SNAPSHOT", "true")
@@ -197,6 +216,8 @@ def test_environment_variables_override_defaults(
     assert settings.model_name == "fraud-risk-classifier-staging"
     assert settings.model_alias == "challenger"
     assert settings.model_dir == Path("/srv/models")
+    assert settings.false_negative_cost == 50.0
+    assert settings.false_positive_cost == 2.5
     assert settings.review_threshold == 0.2
     assert settings.block_threshold == 0.8
     assert settings.persist_feature_snapshot is True
@@ -388,7 +409,7 @@ def test_constructing_settings_opens_no_network_connection(
     settings = load_settings()
 
     assert settings.sqlalchemy_dsn.startswith("postgresql+psycopg://")
-    assert settings.mlflow_tracking_uri == "./mlruns"
+    assert settings.mlflow_tracking_uri == "sqlite:///mlflow.db"
 
 
 def test_importing_config_pulls_in_no_driver_or_tracking_client(tmp_path: Path) -> None:

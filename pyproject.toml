@@ -122,7 +122,7 @@ pretty = true
 # scikit-learn ships no `py.typed` marker (checked at 1.9.1), so its estimators are `Any`
 # here; the preprocessing and split tests assert behaviour, not inferred types.
 [[tool.mypy.overrides]]
-module = ["xgboost.*", "shap.*", "mlflow.*", "evidently.*", "plotly.*", "sklearn.*"]
+module = ["xgboost.*", "shap.*", "mlflow.*", "evidently.*", "plotly.*", "sklearn.*", "joblib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

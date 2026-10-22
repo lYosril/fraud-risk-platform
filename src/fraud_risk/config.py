@@ -84,8 +84,10 @@ class Settings(BaseSettings):
     database_url: str | None = None
 
     # -- MLflow --------------------------------------------------------------
-    # Defaults to a local file store so no tracking server is needed for development.
-    mlflow_tracking_uri: str = "./mlruns"
+    # Defaults to a local SQLite store so no tracking server is needed for development.
+    # MLflow 3.x puts the plain filesystem backend (``./mlruns``) in maintenance mode behind
+    # MLFLOW_ALLOW_FILE_STORE; SQLite is the supported server-less local option.
+    mlflow_tracking_uri: str = "sqlite:///mlflow.db"
     mlflow_experiment_name: str = "fraud-detection"
 
     # -- Reproducibility -----------------------------------------------------
@@ -93,6 +95,15 @@ class Settings(BaseSettings):
     # configuration rather than a constant in a training script so that runs can be compared
     # and reproduced without editing code. ``sklearn`` accepts seeds in [0, 2**32).
     random_seed: int = Field(default=42, ge=0, le=2**32 - 1)
+
+    # -- Training cost model -------------------------------------------------
+    # Relative cost of the two errors, in abstract units: one missed fraud (false negative)
+    # versus one false alarm (false positive). Used to pick each candidate's threshold and
+    # the winning model on validation. Provisional until the business confirms real weights
+    # (docs/ARCHITECTURE.md 13.2); changing them re-ranks candidates, so they are recorded
+    # with every run rather than hardcoded in training code.
+    false_negative_cost: float = Field(default=100.0, gt=0)
+    false_positive_cost: float = Field(default=1.0, gt=0)
 
     # -- Model artifacts -----------------------------------------------------
     model_name: str = "fraud-risk-classifier"

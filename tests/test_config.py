@@ -51,6 +51,7 @@ CONFIG_ENV_VARS = (
     "MODEL_NAME",
     "MODEL_ALIAS",
     "MODEL_DIR",
+    "MODEL_ARTIFACT_PATH",
     "RANDOM_SEED",
     "FALSE_NEGATIVE_COST",
     "FALSE_POSITIVE_COST",
@@ -121,6 +122,7 @@ def test_defaults_point_nowhere_real(load_settings: Callable[..., Settings]) -> 
     assert settings.postgres_host == "localhost"
     assert settings.mlflow_tracking_uri == "sqlite:///mlflow.db"  # local store, no server
     assert not settings.model_dir.is_absolute()
+    assert not settings.model_artifact_path.is_absolute()
     assert settings.dashboard_api_url.startswith("http://localhost")
 
     # The only credential default is an obvious non-secret, and it is refused in production.
@@ -173,6 +175,7 @@ def test_required_settings_are_all_present(load_settings: Callable[..., Settings
     assert settings.sqlalchemy_dsn
     assert settings.mlflow_tracking_uri
     assert settings.model_dir
+    assert settings.model_artifact_path
     assert settings.dashboard_api_url
 
 
@@ -197,6 +200,7 @@ def test_environment_variables_override_defaults(
     monkeypatch.setenv("MODEL_NAME", "fraud-risk-classifier-staging")
     monkeypatch.setenv("MODEL_ALIAS", "challenger")
     monkeypatch.setenv("MODEL_DIR", "/srv/models")
+    monkeypatch.setenv("MODEL_ARTIFACT_PATH", "/srv/models/champion/model.joblib")
     monkeypatch.setenv("FALSE_NEGATIVE_COST", "50")
     monkeypatch.setenv("FALSE_POSITIVE_COST", "2.5")
     monkeypatch.setenv("REVIEW_THRESHOLD", "0.2")
@@ -216,6 +220,7 @@ def test_environment_variables_override_defaults(
     assert settings.model_name == "fraud-risk-classifier-staging"
     assert settings.model_alias == "challenger"
     assert settings.model_dir == Path("/srv/models")
+    assert settings.model_artifact_path == Path("/srv/models/champion/model.joblib")
     assert settings.false_negative_cost == 50.0
     assert settings.false_positive_cost == 2.5
     assert settings.review_threshold == 0.2

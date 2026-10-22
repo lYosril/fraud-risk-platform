@@ -10,14 +10,15 @@ and what does not.
 
 ---
 
-## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation and SHAP explainability complete; nothing served
+## âš ï¸ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability and reusable inference complete; no HTTP API served yet
 
 **Milestone M0 (repository foundation) is complete, the Python 3.11 development environment
 is provisioned, the dataset workflow (acquisition, presence check and contract validation) is
 implemented, and the exploratory analysis, split, preprocessing, model-comparison, frozen
-final-evaluation and SHAP explanation stages are implemented. A winning model artifact, a
-frozen binary operating decision and an explainability report exist locally; no API, dashboard
-or monitoring is served yet.**
+final-evaluation, SHAP explanation and reusable inference-service stages are implemented. A
+winning model artifact, a frozen binary operating decision, an explainability report and a
+validated in-process scoring path exist locally; no FastAPI routes, dashboard or monitoring are
+served yet.**
 
 - **A real three-family comparison and a frozen final evaluation have been run** on the local
   reference dataset (logistic regression, random forest, XGBoost). Their actual metrics are
@@ -101,9 +102,9 @@ does not happen.
 | 0 | Configuration | `fraud_risk/config.py` | **Implemented** (settings + tests) |
 | 1 | Data ingestion & validation | `fraud_risk/data/` | Loading + contract validation **implemented**; fingerprint pending (M1) |
 | 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** (not yet serialised) |
-| 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4); API inference wiring pending (M5) |
-| 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Scaffolded |
-| 5 | FastAPI application | `fraud_risk/api/` | Scaffolded |
+| 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4) |
+| 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Reusable inference service **implemented** (lazy validated load, schema/order checks, score, optional SHAP); registry aliases **scaffolded** (M5) |
+| 5 | FastAPI application | `fraud_risk/api/` | Pydantic request/response schemas **implemented**; routes and persistence **scaffolded** (M6) |
 | 6 | Database layer | `fraud_risk/db/` | Scaffolded |
 | 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Scaffolded |
 | 8 | Monitoring | `fraud_risk/monitoring/` | Scaffolded |
@@ -165,7 +166,10 @@ fraud-risk-platform/
     â”œâ”€â”€ test_evaluation.py      # metric definitions, per-class, majority baseline, cost threshold
     â”œâ”€â”€ test_training.py        # three-family comparison, artifacts, provenance, test isolation
     â”œâ”€â”€ test_final_evaluation.py # frozen decision, one test scoring, policy/CLI checks
-    â””â”€â”€ test_smoke_imports.py   # environment smoke test (declared / installed / importable)
+    â”œâ”€â”€ test_explainability.py   # SHAP schema, additivity, reports
+    â”œâ”€â”€ test_inference.py         # bundle loading, input order, failures, API schemas
+    â”œâ”€â”€ test_tracking.py          # MLflow config, redaction, run fingerprint
+    â””â”€â”€ test_smoke_imports.py     # environment smoke test (declared / installed / importable)
 ```
 
 ---
@@ -563,11 +567,71 @@ random-forest or logistic bundle raises a clear error instead of silently substi
 different explainer or output space. No probability or decision threshold is included in the
 explanation records.
 
+### Scoring one transaction with the reusable inference service
+
+`fraud_risk.models.inference` loads the frozen bundle, checks that its fitted preprocessor
+matches the declared feature order, and scores one transaction through that exact pipeline. It
+never fits, calibrates or re-trains anything during a request. The default artifact is
+`artifacts/final_evaluation/frozen_model.joblib`, generated from `artifacts/comparison/model.joblib`
+by the training and final-evaluation commands:
+
+```bash
+python -m fraud_risk.models.training
+python -m fraud_risk.models.final_evaluation
+```
+
+Override the location with `MODEL_ARTIFACT_PATH` or by passing a path to the service:
+
+```python
+from fraud_risk.models.inference import FraudInferenceService, InferenceRequest
+
+service = FraudInferenceService()  # reads Settings.model_artifact_path
+features = {"V1": -1.2, "V2": 0.4}  # ... V1..V28 in the bundle's declared order
+result = service.predict(
+    InferenceRequest(transaction_id="txn-123", features=features, amount=42.50),
+    explain=True,
+)
+print(result.probability, result.threshold, result.prediction, result.model_version)
+```
+
+`features` must be supplied in the exact order declared by the artifact (`V1..V28` for the
+reference model). `Amount` is passed as the separate top-level `amount` field; alternatively,
+omit `amount` and include `Amount` in `features` as the last key. Reordered, missing, extra,
+non-finite or negative inputs raise `InferenceInputError` rather than being silently realigned.
+A missing, corrupt or schema-incompatible artifact raises `InferenceModelError`. The service is
+lazy and caches the loaded pipeline, so repeated requests reuse the same fitted object.
+
+`model_version` is the bundle's `run_fingerprint` when present; older bundles without a
+fingerprint fall back to the artifact's SHA-256. The response also carries `model_sha256` and
+`model_family`. `explanation` is optional and is only produced when requested; for the selected
+XGBoost bundle it is the SHAP top-k explanation described above, while an unsupported family
+fails loudly instead of returning a different explanation. The binary `prediction` is
+`probability >= threshold` using the threshold stored in the bundle.
+
+The FastAPI-ready request and response models live in `fraud_risk.api.schemas`:
+
+```python
+from fraud_risk.api.schemas import PredictionRequest, PredictionResponse
+
+request = PredictionRequest(
+    transaction_id="txn-123",
+    amount=42.50,
+    features={"V1": -1.2},  # illustrative; the real contract requires the full schema
+    explain=True,
+)
+result = service.predict(request.to_inference_request(), explain=request.explain)
+payload = PredictionResponse.from_result(result).model_dump()
+```
+
+The request schema rejects unknown fields, label fields (`is_fraud` / `Class`), a duplicated
+`Amount` inside `features`, negative amounts and non-finite values. No feature snapshot or raw
+request payload is written to the response.
+
 ### What to look for
 
 - `ruff format --check .` and `ruff check .` report no findings.
 - `mypy` reports `Success: no issues found` (strict mode).
-- `pytest -q` passes twelve suites:
+- `pytest -q` passes fourteen suites:
   - `tests/test_config.py` â€” the configuration contract (version parity, secret-free
     defaults, DSN construction and percent-encoding, threshold validation, caching).
   - `tests/test_dataset.py` â€” the dataset contract: the expected 31-column header,
@@ -621,6 +685,12 @@ explanation records.
     for a scaled fixture), global importance is sorted and row-free, the report writer emits
     strict JSON/CSV/Markdown, probability/threshold fields are absent from explanations, and
     an end-to-end subprocess run writes two non-trivial PNGs from a synthetic fixture.
+  - `tests/test_inference.py` — the reusable serving path: a fitted bundle is loaded and
+    cached, scoring never calls `fit`, probability/threshold/decision/model-version fields stay
+    separate, reordered/missing/extra/non-finite/negative inputs are rejected, missing/corrupt/
+    incompatible artifacts fail with a model error, an optional XGBoost explanation is
+    returned, and the FastAPI-ready request/response schemas reject labels and out-of-range
+    values without exposing a feature snapshot.
   - `tests/test_smoke_imports.py` â€” the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
@@ -637,10 +707,10 @@ Reproduce everything with the commands above â€” do not take it on trust.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 51 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 52 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 45 source files | Success, 32 source files |
-| `pytest -q` | **305 passed** (5 third-party warnings, 70.67 s) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 46 source files | Success, 32 source files |
+| `pytest -q` | **319 passed** (5 third-party warnings, 54.08 s) | **138 passed** (same warnings) |
 
 Tool versions: ruff 0.17.1, mypy 2.4.0, pytest 9.1.1, pandas-stubs 2.3.3.260113, pip 26.2.1.
 The container run used a clean venv and `pip install -e ".[dev]"`.

@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     model_alias: str = "champion"
     # Directory holding published artifact bundles.
     model_dir: Path = Path("./artifacts/models")
+    # The single artifact a reusable inference service loads. The default is the model frozen
+    # by ``models.final_evaluation``; point this at a promoted bundle in a real deployment.
+    model_artifact_path: Path = Path("./artifacts/final_evaluation/frozen_model.joblib")
 
     # -- Decision policy (three-way, docs/ARCHITECTURE.md §6) ----------------
     review_threshold: float = Field(default=0.30, ge=0.0, le=1.0)

@@ -18,8 +18,9 @@ Rules
       rebuild preprocessing.
 
 Status
-    Implemented for the local comparison/final-evaluation bundle. Registry aliases and MLflow
-    version resolution remain M5 work.
+    Implemented for the local comparison/final-evaluation bundle. ``model_version`` is the
+    bundle's ``run_fingerprint`` when present, otherwise the artifact SHA-256. Registry aliases
+    and MLflow version resolution remain M5 work.
 """
 
 from __future__ import annotations
@@ -53,12 +54,19 @@ class FrozenModel:
 
     path: Path
     sha256: str
+    model_version: str
     pipeline: Any
     feature_columns: tuple[str, ...]
     threshold: float
     cost_policy: CostPolicy
     seed: int
     metadata: dict[str, Any]
+
+    @property
+    def family(self) -> str | None:
+        """The estimator family recorded by training, when the bundle has one."""
+        family = self.metadata.get("family")
+        return family if isinstance(family, str) else None
 
 
 def load_model_bundle(path: Path = DEFAULT_COMPARISON_MODEL_PATH) -> FrozenModel:
@@ -130,9 +138,22 @@ def load_model_bundle(path: Path = DEFAULT_COMPARISON_MODEL_PATH) -> FrozenModel
         msg = "model bundle model metadata must be a mapping"
         raise ModelBundleError(msg)
 
+    digest = sha256_file(path)
+    raw_version = record.get("run_fingerprint")
+    if raw_version is None:
+        # Bundles produced before MLflow tracking have no run fingerprint. The content hash
+        # is a stable substitute: it changes whenever the artifact bytes change.
+        model_version = digest
+    elif isinstance(raw_version, str) and raw_version.strip():
+        model_version = raw_version.strip()
+    else:
+        msg = "model bundle run_fingerprint must be a non-empty string when present"
+        raise ModelBundleError(msg)
+
     return FrozenModel(
         path=path,
-        sha256=sha256_file(path),
+        sha256=digest,
+        model_version=model_version,
         pipeline=pipeline,
         feature_columns=feature_columns,
         threshold=threshold,

@@ -4,8 +4,9 @@ Milestones are ordered so that each one is independently demonstrable and no mil
 depends on an unfinished later one. **M0, M1 and M3 are complete. M4 is implemented for the
 comparison, frozen final-evaluation path and one real MLflow-tracked run, but still lacks a
 two-run history, stratified CV and the reliability/Brier comparison. M5 is in progress: the
-bundle contract and XGBoost SHAP layer are implemented; registry, serving inference and the
-promotion gate are not. M2 and M6â€”M9 are not started.**
+bundle contract, XGBoost SHAP layer, reusable inference service and API-facing request/response
+schemas are implemented; registry alias resolution, HTTP routes and the promotion gate are not.
+M2 and M6â€”M9 are not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
 because code exists â€” it is done when its exit criteria pass and the evidence is recorded.
@@ -113,8 +114,9 @@ because code exists â€” it is done when its exit criteria pass and the evid
 - Leakage controls that are unit-tested, not just documented â€” **done** for the split and the
   transform: disjointness, timestamp-boundary integrity, label separation, and training-only
   fitting statistics.
-- Fitted transformer serialisation (joblib) to be embedded in the artifact bundle (D3) â€”
-  **pending**, delivered with the artifact registry in M5.
+- Fitted transformer serialisation (joblib) embedded in the artifact bundle (D3) â€” **done**:
+  the fitted `preprocess` step travels with the model and is the only transform used by
+  `models.inference`; a dedicated cross-process equality test is still desirable.
 - Early precision/recall expectations move to M4: they require a trained, calibrated model,
   and no number may be invented before one exists.
 
@@ -122,9 +124,9 @@ because code exists â€” it is done when its exit criteria pass and the evid
 
 - The transform is fitted once and applied identically in a second process, producing
   identical output for identical input (train/serve skew test).
-  *Partially met: fitted on training rows only and reused unchanged for validation, with the
-  training-only statistics unit-tested. Cross-process identity awaits joblib serialisation
-  (M5).*
+  *Partially met: fitted on training rows only, serialised inside the bundle and reused
+  unchanged at serving time, with the training-only statistics unit-tested. A dedicated
+  cross-process equality test remains.*
 - The EDA run is reproducible from a clean install: `python notebooks/eda.py` regenerates
   every artefact from the input file and labels a non-reference input as synthetic or custom.
   *Met for both the tracked fixture and the local reference file; reproducible from the
@@ -204,21 +206,29 @@ registered by the tracking integration.
   contributions, global mean-absolute importance, top-k per-transaction explanations with
   exact raw/model input values, strict JSON/CSV/Markdown reports and a plotting script under
   the git-ignored `reports/explainability/`. Unsupported model families fail loudly. The
-  API-facing per-request path and the registry are still pending.
-- `models.inference`: lazy load + cache, `predict_one`, and SHAP explanations (Â§7).
-- Documented promotion gate (ARCHITECTURE Â§13.3).
+  per-request path is now wired through `models.inference`; the registry remains pending.
+- `models.inference` â€” **done**: lazy artifact loading and caching, exact feature
+  schema/order validation, fitted-preprocessor compatibility checks, one-row `predict_proba`,
+  bundle threshold, model version/SHA and optional SHAP explanation. Scoring never fits or
+  retrains. Missing/corrupt/incompatible artifacts raise a clear model error.
+- `api.schemas` â€” **done**: Pydantic v2 `PredictionRequest` / `PredictionResponse` ready for
+  FastAPI, rejecting label/unknown fields and constraining input/output ranges. Pydantic
+  schemas for the remaining API routes are still M6 work.
+- `models.registry`, route wiring and the documented promotion gate remain pending.
 
 **Exit criteria**
 
-- Loading a bundle by alias and scoring a fixture transaction returns a calibrated score.
-- Loading a *missing* bundle raises a clear error the API can turn into a 503.
-- Explanations are produced for a single transaction well within an interactive latency budget.
+- Loading the configured bundle and scoring a fixture transaction returns a calibrated score:
+  **met** by the synthetic inference tests; the service also loads the local real artifact.
+- Loading a *missing* bundle raises a clear error the API can turn into a 503: **met**
+  (`InferenceModelError`).
+- Explanations are produced for a single transaction well within an interactive latency budget:
+  **met by the existing SHAP layer and wired through the new service on the selected XGBoost
+  bundle**; the measured 11.4 ms median for one explanation excludes HTTP, persistence and the
+  transaction's own feature construction.
 
-**Status:** the explainability core and its offline report are implemented and tested against
-the selected XGBoost bundle. The registry, the cached serving entry point (`models.inference`),
-the API-facing per-request path and the promotion gate remain pending; the measured 11.4 ms
-median for one explanation excludes HTTP, persistence and the transaction's own feature
-construction.
+**Status:** the inference service and API schemas are implemented and tested. Registry alias
+resolution, FastAPI routes, persistence and the promotion gate remain pending.
 
 **Depends on:** M4.
 

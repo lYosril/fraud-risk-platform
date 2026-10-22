@@ -4,8 +4,9 @@
 > M0, M1 and M3 are complete. M4 is implemented for the three-family comparison, the frozen
 > final evaluation and MLflow run tracking, with stratified CV and the reliability/Brier
 > comparison still open. There is one real tracking run, not a two-run history. M5 has the
-> shared artifact-bundle loader and the offline XGBoost SHAP layer; the registry, serving
-> inference and promotion gate are not implemented. The API, database, dashboard and
+> shared artifact-bundle loader, the offline and per-request XGBoost SHAP layer, and a
+> reusable lazy inference service with FastAPI-ready request/response schemas; the registry,
+> HTTP routes and promotion gate are not implemented. The API routes, database, dashboard and
 > monitoring packages are still scaffolded. Real metrics from the local reference runs are
 > recorded in the README verification record and in the git-ignored artifacts; they describe
 > those runs only.
@@ -75,10 +76,10 @@ code in `src/fraud_risk/`, so training/serving skew is a bug, not a design assum
 |---|------|----------------|----------------|--------|
 | 1 | Data ingestion & validation | `src/fraud_risk/data/` | Load raw files from approved local paths; enforce schema, dtypes, ranges, nullability; block leakage columns; emit a validation report. | Loading + contract/report implemented; value ranges, fingerprint and inference-side leakage guard pending |
 | 2 | EDA & feature engineering | `src/fraud_risk/features/` | Offline analysis (`features.eda` + `notebooks/eda.py`) + reusable, unit-tested transformers (a single `ColumnTransformer` used by training *and* inference). | EDA and the shared transformer implemented; the fitted transformer ships inside the joblib artifact bundle |
-| 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `bundle.py`, `explainability.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost/operating-policy analysis, frozen final evaluation, artifact-bundle loading and SHAP explanations. | Splitting, the three-family comparison (logistic regression, random forest, XGBoost), calibration, per-class/cost metrics, validation-only cost/min-recall/alert-capacity policies, the frozen final evaluation and XGBoost SHAP explanations implemented; CV, reliability/Brier comparison and serving-side inference wiring pending |
+| 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `bundle.py`, `explainability.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost/operating-policy analysis, frozen final evaluation, artifact-bundle loading and SHAP explanations. | Splitting, the three-family comparison (logistic regression, random forest, XGBoost), calibration, per-class/cost metrics, validation-only cost/min-recall/alert-capacity policies, the frozen final evaluation, XGBoost SHAP explanations and serving inference implemented; CV and reliability/Brier comparison pending |
 | 3a | Experiment tracking | `src/fraud_risk/tracking.py` | Optional MLflow boundary: configurable tracking URI, deterministic run fingerprint, parameter/tag/metric/artifact logging, explicit failed-run status. Registration and promotion are deliberately outside it. | Implemented for the training CLI; one real local SQLite-backed run demonstrated. No model registered |
-| 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | Scaffolded |
-| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Scaffolded |
+| 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | `models.inference` implemented: lazy validated artifact loading, schema/order and preprocessing compatibility checks, one-row scoring through the fitted pipeline, frozen binary threshold, model version/SHA and optional SHAP. Registry aliases remain scaffolded; `api.schemas` provides Pydantic request/response models |
+| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Pydantic request/response schemas implemented; routes, dependency wiring and persistence scaffolded (M6) |
 | 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Scaffolded |
 | 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, drift history. Talks to the API/DB, never to model internals. | Scaffolded |
 | 8 | Monitoring | `src/fraud_risk/monitoring/` | Drift detection on inputs and scores, delayed-label performance tracking, report persistence. | Scaffolded |
@@ -98,6 +99,7 @@ api / dashboard  ->  models.inference  ->  models.registry  ->  features  ->  da
 models.explainability  ->  models.bundle  ->  models.evaluation
 models.explainability  ->  features  ->  data
 models.final_evaluation  ->  models.bundle
+models.inference  ->  models.explainability, models.bundle, models.evaluation
 models.training  ->  tracking  (lazy mlflow; no project imports at runtime)
 ```
 
@@ -144,10 +146,14 @@ not create an import cycle with training or configuration.
 ### Online (inference)
 
 1. Client `POST /predict` with a transaction JSON body (Pydantic-validated).
-2. The API resolves the aliased model from the artifact store (cached in-process).
-3. Features are built with the same transformer object that was fitted during training —
-   the fitted transformer travels inside the artifact bundle.
-4. Score → decision (three-way policy, §6) → SHAP top-k contributions.
+2. The API resolves the configured artifact path (registry aliases are still M5 work) and
+   asks the process-wide `models.inference.FraudInferenceService` to load it once.
+3. Features are validated against the bundle's exact names and order, then passed to the
+   same fitted transformer object that was fitted during training — it travels inside the
+   artifact bundle and is never rebuilt at serving time.
+4. The service calls the fitted `predict_proba`, applies the bundle's binary threshold and,
+   when requested, returns SHAP top-k contributions. The three-way review/block policy is
+   still an API-layer concern (§6).
 5. One row is persisted to `predictions`, the explanation included as JSONB, then the
    response is returned.
 
@@ -363,6 +369,34 @@ Global importance is not a measure of model quality or a promotion gate. Mitigat
 analyst-facing text remains a second aggregate layer grouped over `Amount`, hour-of-day and
 `V*` blocks; we do not claim semantic feature stories the data cannot support.
 
+### 7.1 Reusable inference service
+
+`models.inference.FraudInferenceService` is the only scoring entry point outside the API
+wiring. It is constructed with an artifact path, or reads `Settings.model_artifact_path`
+(default `artifacts/final_evaluation/frozen_model.joblib`), and performs no I/O until the
+first request.
+
+- **Load and cache.** `load_model_bundle` validates the artifact schema, threshold, feature
+  columns and `predict_proba`; the service then checks that the fitted `preprocess` step's
+  input and output names exactly match the bundle's feature order and that the classifier
+  expects that many features. A missing, corrupt or incompatible artifact raises
+  `InferenceModelError`; the API can map that to 503.
+- **Validate once per request.** The request carries a single transaction's features and an
+  optional top-level amount. The service rejects missing, extra, reordered, non-finite or
+  negative values before touching the estimator. It builds a one-row frame in the artifact's
+  exact column order, so a reordered JSON object can never be silently realigned.
+- **Score without fitting.** Only the loaded pipeline's `predict_proba` is called. The service
+  never fits, calibrates or rebuilds preprocessing; the threshold comes from the bundle and the
+  binary decision is `probability >= threshold`.
+- **Identity and explanation.** The response carries `model_version` (the bundle
+  `run_fingerprint`, or the artifact SHA-256 for older bundles), `model_sha256`, `model_family`,
+  the probability, threshold and binary prediction. `explain=True` builds/caches the SHAP layer
+  for the selected XGBoost bundle; unsupported families fail loudly rather than returning a
+  different output.
+- **API-facing types.** `api.schemas.PredictionRequest` / `PredictionResponse` are Pydantic v2
+  models ready for FastAPI routes. They reject label fields and unknown fields, constrain the
+  amount and probability ranges, and expose no feature snapshot.
+
 ---
 
 ## 8. Drift monitoring
@@ -398,6 +432,9 @@ warning/alert levels is a *prompt to investigate*, not an automatic retrain trig
 - No credential ever has a real default. Defaults are obviously-fake local placeholders.
 - `DATABASE_URL` overrides the assembled `postgresql+psycopg://` DSN; the DSN property is
   the single source of truth for both the app and Alembic.
+- `MODEL_ARTIFACT_PATH` selects the single bundle the inference service loads; its default is
+  the locally frozen final-evaluation artifact. `MODEL_DIR` is reserved for the registry
+  layout, which is not implemented yet.
 - Streamlit secrets (`secrets.toml`) are git-ignored; the dashboard reads API/DB config from
   environment variables like every other component.
 - CI uses service containers / throwaway credentials, never repository secrets for databases.

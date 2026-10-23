@@ -18,6 +18,16 @@ LEGITIMATE_COLOR = "#067647"
 NEUTRAL_COLOR = "#475467"
 GRID_COLOR = "#eaecf0"
 
+_DECISION_COLORS = {
+    "Flagged fraud": FRAUD_COLOR,
+    "Legitimate": LEGITIMATE_COLOR,
+}
+_REVIEW_COLORS = {
+    "Pending": NEUTRAL_COLOR,
+    "Confirmed fraud": FRAUD_COLOR,
+    "Confirmed legitimate": LEGITIMATE_COLOR,
+}
+
 
 def risk_distribution_figure(
     rows: Sequence[Mapping[str, Any]],
@@ -79,7 +89,7 @@ def decision_mix_figure(counts: Mapping[str, int]) -> go.Figure:
             labels=list(counts),
             values=values,
             hole=0.55,
-            marker_colors=[FRAUD_COLOR, LEGITIMATE_COLOR],
+            marker_colors=[_DECISION_COLORS.get(label, NEUTRAL_COLOR) for label in counts],
             textinfo="label+value",
             hovertemplate="%{label}: %{value}<extra></extra>",
         )
@@ -101,7 +111,7 @@ def review_mix_figure(counts: Mapping[str, int]) -> go.Figure:
         go.Bar(
             x=labels,
             y=values,
-            marker_color=[NEUTRAL_COLOR, FRAUD_COLOR, LEGITIMATE_COLOR],
+            marker_color=[_REVIEW_COLORS.get(label, NEUTRAL_COLOR) for label in labels],
             hovertemplate="%{x}: %{y}<extra></extra>",
         )
     )

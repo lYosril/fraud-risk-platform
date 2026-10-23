@@ -192,7 +192,11 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
     ) as exc:
         logger.error("reference construction failed: %s", exc)
         return EXIT_INVALID
-    write_reference_profile(profile, output)
+    try:
+        write_reference_profile(profile, output)
+    except (OSError, ValueError) as exc:
+        logger.error("could not write reference profile: %s", exc)
+        return EXIT_INVALID
     logger.info(
         "wrote reference profile %s (%d features, %d scored training rows, id %s)",
         output,

@@ -278,12 +278,28 @@ def build_reference_profile(
     if not resolved_columns:
         msg = "at least one feature column is required"
         raise ReferenceProfileError(msg)
+    if len(set(resolved_columns)) != len(resolved_columns):
+        msg = "reference feature columns must be unique"
+        raise ReferenceProfileError(msg)
     missing = [column for column in resolved_columns if column not in features.columns]
     if missing:
         msg = f"reference feature frame is missing columns: {', '.join(missing)}"
         raise ReferenceProfileError(msg)
     if np.asarray(scores).size == 0:
         msg = "reference scores must not be empty"
+        raise ReferenceProfileError(msg)
+    if training_rows < 1:
+        msg = "training_rows must be at least 1"
+        raise ReferenceProfileError(msg)
+    if split_seed < 0:
+        msg = "split_seed must be at least 0"
+        raise ReferenceProfileError(msg)
+    if not 0.0 <= threshold <= 1.0:
+        msg = "threshold must be in [0, 1]"
+        raise ReferenceProfileError(msg)
+    resolved_generated_at = generated_at or datetime.now(UTC)
+    if resolved_generated_at.tzinfo is None or resolved_generated_at.utcoffset() is None:
+        msg = "generated_at must include a timezone"
         raise ReferenceProfileError(msg)
 
     distributions = tuple(
@@ -301,8 +317,11 @@ def build_reference_profile(
         bin_count=bin_count,
         quantile_sample_size=quantile_sample_size,
     )
+    if score.count > training_rows:
+        msg = "scored_rows must not exceed training_rows"
+        raise ReferenceProfileError(msg)
     profile = ReferenceProfile(
-        generated_at=generated_at or datetime.now(UTC),
+        generated_at=resolved_generated_at,
         reference_id="0" * 64,
         source=source,
         model_version=model_version,

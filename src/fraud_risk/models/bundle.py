@@ -120,14 +120,23 @@ def load_model_bundle(path: Path = DEFAULT_COMPARISON_MODEL_PATH) -> FrozenModel
         raise ModelBundleError(msg)
 
     threshold = finite_number(record["threshold"], "threshold")
+    if not 0.0 <= threshold <= 1.0:
+        msg = f"model bundle threshold must be in [0, 1] (got {threshold!r})"
+        raise ModelBundleError(msg)
     raw_policy = record["cost_policy"]
     if not isinstance(raw_policy, dict):
         msg = "model bundle cost_policy must be a mapping"
         raise ModelBundleError(msg)
     try:
         cost_policy = CostPolicy(
-            false_negative_cost=float(raw_policy["false_negative_cost"]),
-            false_positive_cost=float(raw_policy["false_positive_cost"]),
+            false_negative_cost=finite_number(
+                raw_policy["false_negative_cost"],
+                "cost_policy.false_negative_cost",
+            ),
+            false_positive_cost=finite_number(
+                raw_policy["false_positive_cost"],
+                "cost_policy.false_positive_cost",
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         msg = "model bundle cost_policy is invalid"

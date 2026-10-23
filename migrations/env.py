@@ -18,7 +18,8 @@ from fraud_risk.db.models import Prediction
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # A programmatic migration must not disable the application's existing loggers.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The URL may contain percent-encoded credentials; ConfigParser interprets `%`, so escape it.
 config.set_main_option("sqlalchemy.url", get_settings().sqlalchemy_dsn.replace("%", "%%"))

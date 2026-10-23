@@ -220,7 +220,11 @@ def _run_monitor(settings: Settings, options: argparse.Namespace) -> int:
     finally:
         engine.dispose()
 
-    path = write_report(report, report_dir)
+    try:
+        path = write_report(report, report_dir)
+    except (OSError, ValueError) as exc:
+        logger.error("could not write monitoring report: %s", exc)
+        return EXIT_INVALID
     logger.info(
         "monitoring report %s: status=%s predictions=%d validation_failures=%d path=%s",
         report.report_id,

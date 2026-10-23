@@ -133,7 +133,7 @@ fraud-risk-platform/
 â”œâ”€â”€ .env.example              # placeholder configuration only (commit this, not .env)
 â”œâ”€â”€ .gitattributes            # line-ending normalisation
 â”œâ”€â”€ .gitignore
-â”œâ”€â”€ .github/workflows/ci.yml  # lint + type-check + tests (not executed yet)
+â”œâ”€â”€ .github/workflows/ci.yml  # lint + type-check + unit/integration tests (not executed yet)
 â”œâ”€â”€ .python-version           # 3.11
 â”œâ”€â”€ AGENTS.md                 # conventions for future work in this repo
 â”œâ”€â”€ docker-compose.yml        # PostgreSQL only (app services arrive in M9)
@@ -382,6 +382,41 @@ ruff format --check . && ruff check . && mypy && pytest -q
 python -m fraud_risk.data
 python -m fraud_risk.data --path data/sample/creditcard.synthetic.csv
 ```
+
+### Test selection and coverage
+
+```bash
+# Fast unit tests only: no PostgreSQL, no Kaggle credentials, no data/raw
+pytest -q -m "not slow and not integration"
+
+# Environment smoke test (imports the full ML/dashboard stack)
+pytest -q -m slow
+
+# PostgreSQL integration tests; skipped when TEST_DATABASE_URL is unset
+pytest -q -m integration
+
+# Everything, including the five PostgreSQL round-trips
+pytest -q
+```
+
+Unmarked tests are fast unit tests. `slow` is reserved for the dependency smoke test;
+`integration` requires the Compose PostgreSQL service. No ordinary unit test downloads a
+dataset or reads `data/raw/`. The coverage command used for the current baseline is:
+
+```bash
+# PowerShell; use `TEST_DATABASE_URL=... pytest ...` in Bash
+$env:TEST_DATABASE_URL="postgresql+psycopg://fraud:change-me@127.0.0.1:55432/fraud_test_monitoring"
+pytest -q --cov=fraud_risk --cov-report=term-missing
+```
+
+### Continuous integration
+
+GitHub Actions runs on every pull request and on pushes to `main`. The workflow installs the
+project with `pip install -e ".[dev]"` on the documented Python 3.11, runs ruff linting and
+format checks, strict mypy and the non-integration tests, then runs the PostgreSQL integration
+tests against an ephemeral service container. The required check names, service configuration
+and local equivalents are documented in [`docs/CI.md`](docs/CI.md). The workflow has not yet
+run on GitHub.
 
 ### Exploratory analysis (optional, requires the dataset)
 
@@ -988,7 +1023,7 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
 
 - `ruff format --check .` and `ruff check .` report no findings.
 - `mypy` reports `Success: no issues found` (strict mode).
-- `pytest -q` passes all nineteen test files:
+- `pytest -q` passes all thirty test files:
   - `tests/test_config.py` â€” the configuration contract (version parity, secret-free
     defaults, DSN construction and percent-encoding, threshold validation, caching).
   - `tests/test_dataset.py` â€” the dataset contract: the expected 31-column header,
@@ -1026,6 +1061,10 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
     before test, test is scored exactly once, corrupting test labels/features cannot change the
     threshold or validation metrics, the frozen copy is byte-identical, policy/CLI validation,
     and the metric/probability/decision records stay consistent.
+  - `tests/test_bundle.py` — the artifact contract: missing/corrupt/non-mapping bundles,
+    schema and required-key checks, callable-pipeline and unique-feature-column guards, seed
+    bounds, finite in-range thresholds, positive finite cost weights, run-fingerprint
+    validation, content-hash fallback and metadata handling.
   - `tests/test_training.py` â€” the comparison: all three families fitted, selection by
     validation expected cost rather than accuracy, a reloadable `model.joblib`, every required
     metric plus per-class and cost-impact records, threshold freezing, reproducibility,
@@ -1036,6 +1075,9 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
   - `tests/test_tracking.py` — the tracking boundary: configuration from settings, blank-value
     rejection, credential/query redaction, and the deterministic, input-sensitive run
     fingerprint.
+  - `tests/test_tracking_session.py` — the MLflow session boundary: parameter/metric/artifact
+    validation, finite numeric metrics, client-failure wrapping, terminal-state idempotence,
+    best-effort failure tags, and the context manager completing or failing a run.
   - `tests/test_explainability.py` — the SHAP layer: the selected XGBoost bundle loads,
     unsupported families fail loudly, top-k contributions are ranked and additive in the
     explained tree-margin space, displayed values equal the exact preprocessor inputs (also
@@ -1058,6 +1100,10 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
     allow/deny and admin
     preflight, production docs removal, factory laziness and a subprocess proof that importing
     the app opens no network connection.
+  - `tests/test_api_middleware.py` — the ASGI boundary: declared/chunked body limits, invalid
+    and negative `Content-Length`, body replay, disconnect handling, non-HTTP pass-through,
+    and access logs that contain method/path/status/duration but never query strings, headers,
+    tokens or bodies; a raised exception is still logged as 500.
   - `tests/test_db.py` — the database contract: ORM shape and privacy defaults, repository
     commit/rollback policy for create/read/filtered-list/summary/review, terminal review-state
     enforcement, request-scoped session rollback/close, monitoring/performance table
@@ -1074,19 +1120,34 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
     buckets, risk-band labels, predicted-label vs analyst-outcome display tables, hourly volume,
     monitoring feature/version tables, performance version/segment tables, undefined metrics and
     status labels, UTC timestamps and explanation ordering.
+  - `tests/test_dashboard_charts.py` — the Plotly boundary: empty states, bin midpoints/widths,
+    threshold lines (including invalid thresholds), decision/review colours mapped by label
+    rather than dictionary order, hourly volume and signed explanation contributions.
   - `tests/test_monitoring.py` — drift and reporting: PSI against identical and analytically
     known distributions, reference-bin reuse and shifted distribution detection, the KS
     half-shift case, missing-value accounting, reference-profile round-trip/tamper detection,
     unshifted/shifted/empty windows, absent snapshots, truncated samples, validation-failure
     rates, the explicit unavailable-performance state and JSON report writing.
+  - `tests/test_monitoring_validation.py` — monitoring guards: finite-value filtering, PSI/KS
+    input validation, status-band boundaries, duplicate/missing reference features, score-row
+    and metadata bounds, timezone-aware generation times, malformed reference sections and
+    missing/invalid profile files.
+  - `tests/test_monitoring_repository.py` — monitoring persistence: event validation and
+    commit/rollback, recorder failure swallowing, exact aggregate counts, bounded sample
+    conversion, report persistence/read errors and log messages that omit database details.
+  - `tests/test_monitoring_cli.py` — the scheduled monitor CLI: success/no-persist paths,
+    invalid windows, parser overrides, report-write containment and engine disposal.
   - `tests/test_performance.py` — delayed-label performance: hand-computed precision/recall/F1/
     PR-AUC/ROC-AUC/FPR and confusion matrix, threshold effects, missing-class and zero-denominator
     undefined states with reasons, exact-schema rejection (missing/extra columns, `review_status`,
     raw `Class`, NaN/non-finite values, invalid labels/scores, naive timestamps, blank versions,
     duplicates), version/period grouping, inclusive window filtering, provenance and
     unverified-label warnings, JSON writing and the no-persist CLI path.
+  - `tests/test_performance_repository.py` — delayed-label report persistence: aggregate-only
+    row mapping, commit/rollback policy, latest-report reads and safe persistence errors.
   - `tests/test_models_reference.py` — the offline reference CLI: deterministic bounded sampling,
-    training-split/model-pipeline orchestration (with fakes) and invalid-bound rejection.
+    training-split/model-pipeline orchestration (with fakes), missing-feature and invalid-bound
+    rejection, missing-input exit codes and containment of construction/write failures.
   - `tests/test_smoke_imports.py` — the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
@@ -1096,23 +1157,29 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
 
 ### Verification record
 
-Last full check on the supported interpreter (Python 3.11.9, Windows), with the Compose
-PostgreSQL service reachable through `TEST_DATABASE_URL`. The Linux column is the last
+Last full check on 23 October 2026 on the supported interpreter (Python 3.11.9, Windows), with
+the Compose PostgreSQL service reachable through `TEST_DATABASE_URL`. The Linux column is the last
 `python:3.11-slim` run (Python 3.11.17) and **predates the EDA, splitting, modelling and API
 stages**: Docker was not running when those changes were verified, so it was not re-run.
 Reproduce everything with the commands above.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 83 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 91 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 71 source files | Success, 32 source files |
-| `pytest -q` | **512 passed** (4 third-party warnings, 68.53 s) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 79 source files | Success, 32 source files |
+| `pytest -q` | **617 passed** (4 third-party warnings, 94.28 s) | **138 passed** (same warnings) |
 
 The `pytest -q` row includes five PostgreSQL integration tests against the dedicated Compose
 database (`fraud_test_monitoring`) with `TEST_DATABASE_URL` set; the existing `fraud` database
-was not used for test writes. Without `TEST_DATABASE_URL` those five are skipped. The suite was
+was not used for test writes. Without `TEST_DATABASE_URL` the same suite reports **612 passed,
+5 skipped**. The suite was
 run against this worktree; it is not a claim that a deployment or its infrastructure is secure.
+A coverage run with the same `TEST_DATABASE_URL` reported **617 passed** and **84% total
+coverage** (140.74 s). The remaining uncovered code is concentrated in the Streamlit entry
+script (`dashboard/app.py`, 0%), broad HTTP-client branches (`dashboard/api_client.py`, 82%),
+and error-only branches in inference, explainability, final evaluation and performance
+reporting; those gaps are listed rather than papered over with mocked happy paths.
 
 Tool versions: ruff 0.17.1, mypy 2.4.0, pytest 9.1.1, pandas-stubs 2.3.3.260113, pip 26.2.1.
 The container run used a clean venv and `pip install -e ".[dev]"`.

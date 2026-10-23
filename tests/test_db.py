@@ -9,6 +9,7 @@ offline Alembic rendering. Real round-trip and schema/migration checks live in
 from __future__ import annotations
 
 import io
+import logging
 from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -606,3 +607,4 @@ def test_offline_migration_renders_the_prediction_schema(monkeypatch: pytest.Mon
     assert "ck_predictions_review_status_allowed" in sql
     assert "ck_drift_reports_window_order" in sql
     assert "ck_predictions_ck_predictions" not in sql
+    assert logging.getLogger("fraud_risk.monitoring.repository").disabled is False

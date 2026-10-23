@@ -1,30 +1,29 @@
 name: CI
 
-# NOTE: this workflow has not been executed yet. It is scaffolding for milestone M9;
-# it is only trustworthy once it has run green on a real commit (docs/ROADMAP.md, M9).
-
+# Trigger on every pull request and on pushes to the primary branch only.
 # `on` is quoted because YAML 1.1 parsers (including PyYAML) coerce the bare key to the
 # boolean `true`; GitHub's parser accepts either, but quoting keeps local linters honest.
 "on":
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The workflow only reads the repository. No deployment, package publishing or secrets.
 permissions:
   contents: read
 
 env:
-  # Keep CI deterministic about the supported interpreter.
-  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
   quality:
     name: Lint, type-check and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
@@ -33,7 +32,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          # The repository documents Python 3.11 in `.python-version`.
+          python-version-file: .python-version
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -52,8 +52,50 @@ jobs:
         run: mypy
 
       - name: Unit tests
-        run: pytest -q
+        run: python -m pytest -q -m "not integration"
 
-      # An integration job with a PostgreSQL service container and
-      # `pytest -m integration` is added in milestone M2, once those tests exist.
-      # Adding it now would produce a permanently red job that collects zero tests.
+  integration:
+    name: PostgreSQL integration tests
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fraud
+          POSTGRES_DB: fraud_test
+          # Job-local, ephemeral service only. Trust authentication avoids storing any
+          # password or production credential in the workflow.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fraud -d fraud_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # No password: the service above uses trust authentication for this job only.
+      TEST_DATABASE_URL: postgresql+psycopg://fraud@localhost:5432/fraud_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: PostgreSQL integration tests
+        run: python -m pytest -q -m integration

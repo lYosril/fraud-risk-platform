@@ -6,15 +6,22 @@
 > comparison still open. There is one real tracking run, not a two-run history. M5 has the
 > shared artifact-bundle loader, the offline and per-request XGBoost SHAP layer, a reusable lazy
 > inference service and FastAPI-ready request/response schemas; registry alias resolution and
-> the promotion gate are not implemented. M2 has the predictions table, Alembic migration and
-> repository read/write/filtered-history/summary paths; feedback-label and drift-report tables
-> remain open. M6 is partially implemented: the versioned HTTP surface, dependency wiring, CORS policy,
-> safe error mapping and admin-protected history/filtering/summary/review routes exist;
-> request-id logging and feedback capture remain open. M7 is partially implemented: the
-> Streamlit overview, scoring, filtered history, explanation and analyst-review views read and
-> write through the API; drift-history views are still future work. The monitoring package is
-> still scaffolded. Real metrics from the local reference runs are recorded in the README
-> verification record and in the git-ignored artifacts; they describe those runs only.
+> the promotion gate are not implemented. M2 has the predictions table, the count-only
+> monitoring_events and drift_reports tables, the aggregate performance_reports table, Alembic
+> migrations and repository read/write/filtered-history/summary paths; the feedback_labels table
+> remains open. M6 is partially implemented: the versioned HTTP surface, dependency wiring, CORS
+> policy, safe error mapping, admin-protected history/filtering/summary/review routes and the
+> monitoring/performance-summary routes exist; request-id logging and feedback capture remain
+> open. M7 is partially implemented: the Streamlit overview, scoring, filtered history,
+> explanation, analyst-review, monitoring and performance summary views read through the API;
+> historical drift-trend views are still future work. M8 is implemented for measurable signals:
+> first-party PSI/KS drift, missing values, count-only validation failures, traffic/version
+> usage, report persistence, and repeatable delayed-label performance reports from a separately
+> supplied scored evaluation extract. The feedback_labels table is still open, so the drift
+> workflow cannot join labels automatically and continues to report performance as unavailable.
+> Evidently is an optional rendering extra that is not installed here. M9 is not started. Real
+> metrics from the local reference runs are recorded in the README verification record and in
+> the git-ignored artifacts; they describe those runs only.
 
 ---
 
@@ -84,10 +91,10 @@ code in `src/fraud_risk/`, so training/serving skew is a bug, not a design assum
 | 3 | Training & evaluation | `src/fraud_risk/models/splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `bundle.py`, `explainability.py` | Splitting, cross-validation, class-imbalance handling, probability calibration, metric computation, business-cost/operating-policy analysis, frozen final evaluation, artifact-bundle loading and SHAP explanations. | Splitting, the three-family comparison (logistic regression, random forest, XGBoost), calibration, per-class/cost metrics, validation-only cost/min-recall/alert-capacity policies, the frozen final evaluation, XGBoost SHAP explanations and serving inference implemented; CV and reliability/Brier comparison pending |
 | 3a | Experiment tracking | `src/fraud_risk/tracking.py` | Optional MLflow boundary: configurable tracking URI, deterministic run fingerprint, parameter/tag/metric/artifact logging, explicit failed-run status. Registration and promotion are deliberately outside it. | Implemented for the training CLI; one real local SQLite-backed run demonstrated. No model registered |
 | 4 | Artifact management & inference | `src/fraud_risk/models/registry.py`, `inference.py` | Publish/load versioned artifact bundles (model + preprocessing + metadata); in-process caching; score/explanations. | `models.inference` implemented: lazy validated artifact loading, schema/order and preprocessing compatibility checks, one-row scoring through the fitted pipeline, frozen binary threshold, model version/SHA and optional SHAP. Registry aliases remain scaffolded; `api.schemas` provides Pydantic request/response models |
-| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Application factory, dependency providers, versioned health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review routes, Pydantic contracts, per-item batch errors, request/batch limits, CORS policy, safe error mapping, admin bearer-token auth and access logging implemented; monitoring and request IDs pending (M6) |
-| 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Predictions model, session lifecycle, initial Alembic migration and repository create/read/list/summary/review paths implemented; feedback-label and drift-report tables pending (M2) |
-| 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, drift history. Talks to the API/DB, never to model internals. | Overview counts, risk/decision/review charts, filtered history, transaction scoring, explanation rendering and an admin-only analyst review workflow implemented against the API; drift-history views pending (M7) |
-| 8 | Monitoring | `src/fraud_risk/monitoring/` | Drift detection on inputs and scores, delayed-label performance tracking, report persistence. | Scaffolded |
+| 5 | FastAPI application | `src/fraud_risk/api/` | HTTP surface, request/response schemas, dependency wiring, error handling, request IDs. | Application factory, dependency providers, versioned health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review/monitoring-summary/performance-summary routes, Pydantic contracts, per-item batch errors, request/batch limits, CORS policy, safe error mapping, admin bearer-token auth and access logging implemented; request IDs and feedback capture pending (M6) |
+| 6 | Database layer | `src/fraud_risk/db/` | SQLAlchemy 2.x models, engine/session lifecycle, Alembic migrations. | Predictions, count-only monitoring_events, aggregate drift_reports and aggregate performance_reports models, session lifecycle, Alembic migrations and repository create/read/list/summary/review paths implemented; feedback_labels table pending (M2) |
+| 7 | Streamlit dashboard | `src/fraud_risk/dashboard/` | Read-only analytics: volume, score/decision distribution, review queue, monitoring and performance summaries. Talks to the API/DB, never to model internals. | Overview counts, risk/decision/review charts, filtered history, transaction scoring, explanation rendering, an admin-only analyst review workflow and monitoring/performance summary tabs implemented against the API; historical drift-trend views pending (M7) |
+| 8 | Monitoring | `src/fraud_risk/monitoring/`, `src/fraud_risk/models/reference.py` | First-party drift statistics, compact training reference, machine-readable reports, count-only validation signals, and delayed-label performance from explicit evaluation extracts. | PSI/KS feature and score drift, missing values, validation-failure counts, traffic/model-version usage, JSON + `drift_reports` persistence, admin summary route, dashboard tab and reference CLI implemented; the separate performance workflow validates a scored labeled extract, computes PR-AUC/ROC-AUC/precision/recall/F1/FPR and a confusion matrix by model version and period, persists `performance_reports`, and exposes an admin summary route and dashboard tab. Automatic feedback-label joins remain unavailable because `feedback_labels` is not implemented. Evidently HTML rendering is an optional extra (M8) |
 | 9 | Tests & deployment | `tests/`, `.github/workflows/`, `docker-compose.yml` | Unit/integration tests, CI pipeline, local infrastructure. | Scaffolded |
 
 Cross-cutting: `src/fraud_risk/config.py` (the only place environment configuration is read)
@@ -99,7 +106,10 @@ configuration types only under `TYPE_CHECKING` and imports MLflow lazily).
 ```
 api / dashboard  ->  models.inference  ->  models.registry  ->  features  ->  data
                      |
-                     +-> db (models + session)      monitoring -> db, features
+                     +-> db (models + session)      monitoring -> db
+
+models.reference  ->  models.bundle, models.splitting, data, features, monitoring.reference
+monitoring        ->  db, numpy only for drift/report building (no model import)
 
 models.explainability  ->  models.bundle  ->  models.evaluation
 models.explainability  ->  features  ->  data
@@ -107,6 +117,10 @@ models.final_evaluation  ->  models.bundle
 models.inference  ->  models.explainability, models.bundle, models.evaluation
 models.training  ->  tracking  (lazy mlflow; no project imports at runtime)
 ```
+
+The monitoring report path deliberately does not import `models`: it reads a precomputed
+reference profile and persisted predictions. `models.reference` is the offline composition point
+that scores the training split and writes that profile.
 
 `models.bundle` owns the shared artifact contract, so the final-evaluation stage and the
 explainability layer both load the same validated bundle without importing each other.
@@ -216,8 +230,9 @@ holds the Plotly figures. The overview uses database aggregate counts and fixed-
 so its totals do not depend on a paginated page. The analyst-review tab filters persisted rows
 by date, risk score, model prediction and review status, and only offers a review form for
 pending rows. Tables and metrics explicitly label the model's predicted label separately from
-the analyst's review outcome. Model performance remains explicitly unavailable until feedback
-labels or an evaluation endpoint exist. On an unreachable API or an invalid response, the
+the analyst's review outcome. The drift report keeps model performance explicitly unavailable
+until automatic feedback labels exist; the separate performance tab renders aggregate metrics
+from an operator-supplied verified extract. On an unreachable API or an invalid response, the
 affected section shows an error state rather than a synthetic dataset. The admin token comes
 from `Settings.api_admin_token`; review controls are hidden without it, and the API independently
 enforces authorization. The token is never embedded in the dashboard or displayed.
@@ -274,8 +289,10 @@ binary.
 | Table | Purpose |
 |-------|---------|
 | `predictions` | One row per scored transaction (above). |
-| `feedback_labels` | Analyst-confirmed outcomes, joined to `predictions` later. Delayed labels are the norm, so this is a separate table, not a column update that may never arrive. |
-| `drift_reports` | Persisted drift runs (window, metric, value, threshold, breached flag) so the dashboard can show trends rather than a single point. |
+| `monitoring_events` | Count-only input-validation failures: endpoint path, reason code, timestamp and `failure_count`. No request body, headers, token or feature value. |
+| `drift_reports` | One aggregate monitoring run: window, reference ID, summary statuses/counts and the complete JSON report. The dashboard reads the latest row; raw transaction rows are not copied here. |
+| `performance_reports` | One aggregate delayed-label evaluation run: window, threshold, period, label source/verification flag, row/version/segment counts and the complete JSON report. It stores no feature row, transaction identifier or raw label. |
+| `feedback_labels` | Analyst-confirmed outcomes, joined to `predictions` later. Delayed labels are the norm, so this is a separate table, not a column update that may never arrive. **Not yet implemented**; the drift workflow therefore reports performance as unavailable. The separate performance workflow requires an operator-supplied scored extract and does not infer labels from review state. |
 
 Alembic owns the schema; migrations are generated in M2 and are the only way the schema
 changes. No `create_all()` outside tests.
@@ -471,22 +488,70 @@ first request.
 
 Rationale: this module runs on a schedule and must be testable and dependency-light; it needs
 a handful of well-understood statistics on a fixed set of columns, not a framework. Evidently
-is genuinely useful for its rich report HTML and is therefore offered as an optional extra
-(`pip install -e ".[monitoring]"`), used to render reports — but the *decision metric* stays
-in our code so it can be unit-tested and its thresholds version-controlled.
+is offered as an optional extra (`pip install -e ".[monitoring]"`) for rich report HTML, but the
+*decision metric* stays in our code so it can be unit-tested and its thresholds version-controlled.
+It is not installed in the default environment.
+
+The reference profile is built from the **training split only** and contains aggregate quantile
+bins, a 101-point score/feature sample, means, missing rates and provenance (dataset source,
+split strategy/seed, model version/SHA, threshold). It contains no transaction row. The build is
+performed by `python -m fraud_risk.models.reference`; `python -m fraud_risk.monitoring run`
+reads that profile and a persisted window. A SHA-256 digest of the distribution content detects
+a manually edited profile when it is loaded.
 
 What is monitored:
 
-| Signal | Metric | Window |
-|--------|--------|--------|
-| Input features | Population Stability Index per feature (binned, reference = training distribution) | rolling |
-| Input features | Kolmogorov–Smirnov two-sample statistic + p-value | rolling |
-| Model score | PSI + mean/quantile shift of `score` | rolling |
-| Traffic | Prediction volume, `allow`/`review`/`block` mix | rolling |
-| Performance | PR-AUC / recall on joined `feedback_labels` | rolling, delayed |
+| Signal | Metric | Availability |
+|--------|--------|--------------|
+| Input features | PSI and KS per feature, missing rate | Only with `PERSIST_FEATURE_SNAPSHOT=true` and stored snapshots |
+| Model score | PSI, KS, mean shift and p50/p90/p99 | Whenever predictions exist |
+| Traffic | Prediction volume, binary decision mix, model-version usage | Whenever predictions exist |
+| Input validation | Count and rejected-request rate, count-only by endpoint/reason | When validation-failure capture is enabled |
+| Performance | PR-AUC / recall on complete delayed labels | **Unavailable in the drift report**: no automatic complete-labels source exists. Available through the separate performance workflow when an operator supplies a verified scored extract |
 
-Alerting is threshold-based and reported in `drift_reports`. A PSI above the configured
-warning/alert levels is a *prompt to investigate*, not an automatic retrain trigger.
+The report keeps data drift and model performance separate. A distribution shift is a prompt to
+investigate, not evidence that fraud detection degraded. Analyst-confirmed outcomes are reported
+only as an incomplete, non-random reviewed subset; this platform does not compute an overall
+PR-AUC, recall or accuracy from them. `performance.available=false` is explicit, with a reason
+distinguishing an empty window, no reviewed outcomes and non-random review selection.
+
+Alert thresholds are configuration (`MONITORING_*`), validated so warning < alert and copied into
+every report: default PSI warning/alert 0.10/0.25, KS 0.10/0.20, missing rate 1%/5% and
+validation-failure rate 2%/5%. PSI bins come from the reference and are reused unchanged; empty
+bins are floored at `1e-6` and renormalised (documented in `docs/MONITORING.md`). KS uses the
+stored reference sample, so it is approximate.
+
+The monitoring path reads at most `MONITORING_SAMPLE_LIMIT` newest rows for distributions, while
+traffic counts remain exact; `sample_truncated` makes the distinction visible. An empty window
+is a valid `unavailable` report, not a zero-drift result. Each run writes timestamped JSON plus
+`latest.json` and, unless `--no-persist` is used, one `drift_reports` row. The admin route
+`GET /api/v1/monitoring/summary` and the dashboard monitoring tab render the latest row. The
+runbook, threshold rationale and limitations are in [`MONITORING.md`](MONITORING.md).
+
+### 8.1 Delayed-label performance reports
+
+Routine performance evaluation is a separate, explicitly supplied workflow. It does not read
+`predictions.review_status`, does not join `feedback_labels` (which is not implemented), and
+does not read the frozen final-evaluation metrics. The operator provides a CSV with exactly the
+model feature columns (`V1..V28`, `Amount`), the verified target `is_fraud`, the score served at
+prediction time `risk_score`, `model_version` and a timezone-aware `scored_at`. Scores are never
+recomputed with a later model, so one report can compare multiple versions.
+
+`python -m fraud_risk.monitoring performance --path ... --threshold ... --label-source ...`
+computes precision, recall, F1, PR-AUC (average precision), ROC-AUC, a confusion matrix and the
+false-positive rate. It groups by `(model_version, day|week|month)` and records the threshold,
+period, label source, `--labels-verified` flag, dataset SHA-256 and evaluation timestamp. Every
+metric is a `{value, defined, reason}` object: a metric that cannot be computed is `null` with
+an explicit reason, never zero. PR-AUC and ROC-AUC require both classes; precision requires a
+predicted positive; recall an actual positive; F1 both precision and recall; and the
+false-positive rate an actual negative.
+
+The report contains aggregates only and is written to timestamped JSON plus `latest.json` and,
+unless `--no-persist` is used, one `performance_reports` row. `GET /api/v1/performance/summary`
+and the dashboard Performance tab render the latest row. The workflow and its late-label
+limitations are documented in [`PERFORMANCE.md`](PERFORMANCE.md). The final held-out test
+evaluation remains separate under `artifacts/final_evaluation/` and must not be used for
+tuning; routine reports must not be used to select a model on their own labels.
 
 ---
 
@@ -501,6 +566,12 @@ warning/alert levels is a *prompt to investigate*, not an automatic retrain trig
 - `MODEL_ARTIFACT_PATH` selects the single bundle the inference service loads; its default is
   the locally frozen final-evaluation artifact. `MODEL_DIR` is reserved for the registry
   layout, which is not implemented yet.
+- `MONITORING_WINDOW_HOURS`, `MONITORING_SAMPLE_LIMIT`, the reference/report paths, snapshot
+  capture and every warning/alert threshold are configuration, not constants in analysis code.
+  Invalid bands (warning >= alert) fail settings validation at startup.
+- `PERFORMANCE_REPORT_DIR` and `PERFORMANCE_PERIOD` configure routine performance report output
+  and grouping. The evaluation threshold and label source are deliberately required CLI
+  arguments, not environment defaults, so every report records an explicit decision.
 - Streamlit secrets (`secrets.toml`) are git-ignored; the dashboard reads API/DB config from
   environment variables like every other component.
 - CI uses service containers / throwaway credentials, never repository secrets for databases.

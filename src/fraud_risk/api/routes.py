@@ -13,8 +13,10 @@ Rules
     - A batch item is validated independently; one bad transaction cannot discard the rest.
     - Successful predictions are persisted through the injected repository; a failed write
       rolls back and becomes a safe 503 rather than a false success.
-    - Model metadata, prediction history and analyst review require the administrative bearer
-      token. They fail closed with 503 when ``API_ADMIN_TOKEN`` is not configured.
+    - Model metadata, prediction history, analyst review and the latest monitoring report
+      require the administrative bearer token. They fail closed with 503 when
+      ``API_ADMIN_TOKEN`` is not configured.
+    - Input-validation failures are counted without storing the request payload.
     - No handler logs a request payload or feature snapshot.
     - Model and persistence failures are mapped to stable, non-leaking 503s by ``api.main``.
 """
@@ -34,6 +36,9 @@ from fraud_risk import __version__
 from fraud_risk.api.dependencies import (
     get_app_settings,
     get_inference_service,
+    get_monitoring_recorder,
+    get_monitoring_repository,
+    get_performance_repository,
     get_prediction_repository,
     require_admin_api_token,
 )
@@ -44,6 +49,8 @@ from fraud_risk.api.schemas import (
     ErrorResponse,
     HealthResponse,
     ModelMetadataResponse,
+    MonitoringSummaryResponse,
+    PerformanceSummaryResponse,
     PredictionHistoryResponse,
     PredictionRecordResponse,
     PredictionRequest,
@@ -67,6 +74,9 @@ from fraud_risk.models.inference import (
     InferenceInputError,
     InferenceModelError,
 )
+from fraud_risk.monitoring.events import MonitoringEventRecorder
+from fraud_risk.monitoring.performance_repository import PerformanceRepository
+from fraud_risk.monitoring.repository import MonitoringRepository
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +85,9 @@ router = APIRouter()
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 InferenceServiceDep = Annotated[FraudInferenceService, Depends(get_inference_service)]
 PredictionRepositoryDep = Annotated[PredictionRepository, Depends(get_prediction_repository)]
+MonitoringRepositoryDep = Annotated[MonitoringRepository, Depends(get_monitoring_repository)]
+PerformanceRepositoryDep = Annotated[PerformanceRepository, Depends(get_performance_repository)]
+MonitoringRecorderDep = Annotated[MonitoringEventRecorder, Depends(get_monitoring_recorder)]
 
 
 @router.get(
@@ -331,6 +344,81 @@ async def review_prediction(
     return PredictionRecordResponse.model_validate(record)
 
 
+@router.get(
+    "/monitoring/summary",
+    response_model=MonitoringSummaryResponse,
+    dependencies=[Depends(require_admin_api_token)],
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": ErrorResponse,
+            "description": "Missing or invalid administrative bearer token",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "Monitoring storage is unavailable or the admin API is disabled",
+        },
+    },
+    summary="Latest persisted monitoring report (admin)",
+)
+async def monitoring_summary(
+    repository: MonitoringRepositoryDep,
+) -> MonitoringSummaryResponse:
+    """Return the newest aggregate drift report, or an explicit unavailable state."""
+    report = await run_in_threadpool(repository.latest_report)
+    if report is None:
+        return MonitoringSummaryResponse(
+            available=False,
+            reason=(
+                "No monitoring report has been generated. Run "
+                "`python -m fraud_risk.monitoring run` after building the reference profile."
+            ),
+            report=None,
+        )
+    return MonitoringSummaryResponse(
+        available=True,
+        reason=None,
+        report=report.payload,
+    )
+
+
+@router.get(
+    "/performance/summary",
+    response_model=PerformanceSummaryResponse,
+    dependencies=[Depends(require_admin_api_token)],
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": ErrorResponse,
+            "description": "Missing or invalid administrative bearer token",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "Performance storage is unavailable or the admin API is disabled",
+        },
+    },
+    summary="Latest delayed-label performance report (admin)",
+)
+async def performance_summary(
+    repository: PerformanceRepositoryDep,
+) -> PerformanceSummaryResponse:
+    """Return the newest aggregate performance report, or an explicit unavailable state."""
+    report = await run_in_threadpool(repository.latest_report)
+    if report is None:
+        return PerformanceSummaryResponse(
+            available=False,
+            reason=(
+                "No performance report has been generated. Run "
+                "`python -m fraud_risk.monitoring performance --path ... --threshold ... "
+                "--label-source ...` with a verified, scored evaluation extract."
+            ),
+            report=None,
+        )
+    return PerformanceSummaryResponse(
+        available=True,
+        reason=None,
+        report=report.payload,
+    )
+
+
 @router.post(
     "/predict",
     response_model=PredictionResponse,
@@ -396,6 +484,7 @@ async def predict_batch(
     settings: SettingsDep,
     service: InferenceServiceDep,
     repository: PredictionRepositoryDep,
+    recorder: MonitoringRecorderDep,
 ) -> BatchPredictionResponse:
     """Score raw items independently, preserving input order and per-item errors."""
     if len(request.items) > settings.batch_max_size:
@@ -413,11 +502,13 @@ async def predict_batch(
 
     results: list[BatchPredictionItemResult] = []
     rows_to_persist: list[PredictionCreate] = []
+    validation_failures = 0
     for index, raw in enumerate(request.items):
         try:
             item = PredictionRequest.model_validate(raw)
         except ValidationError as exc:
             results.append(_batch_error(index, raw, safe_validation_detail(exc)))
+            validation_failures += 1
             continue
 
         try:
@@ -430,6 +521,7 @@ async def predict_batch(
             raise
         except InferenceInputError as exc:
             results.append(_batch_error(index, raw, str(exc)))
+            validation_failures += 1
         except InferenceError as exc:
             # For example, an explanation was requested for an unsupported model family.
             results.append(_batch_error(index, raw, str(exc)))
@@ -444,6 +536,15 @@ async def predict_batch(
                 )
             )
             rows_to_persist.append(_prediction_create(prediction_response, item, settings))
+
+    if validation_failures:
+        await run_in_threadpool(
+            lambda: recorder.record_validation_failures(
+                endpoint=_batch_endpoint(settings),
+                reason_code="batch_item_validation",
+                count=validation_failures,
+            )
+        )
 
     if rows_to_persist:
         await run_in_threadpool(repository.create_many, rows_to_persist)
@@ -503,6 +604,12 @@ def _batch_error(index: int, raw: dict[str, Any], detail: str) -> BatchPredictio
         status="error",
         error=detail,
     )
+
+
+def _batch_endpoint(settings: Settings) -> str:
+    """Return the mounted batch path without a query string or request body."""
+    prefix = settings.api_prefix.rstrip("/")
+    return f"{prefix}/predict/batch" if prefix else "/predict/batch"
 
 
 def _prediction_create(

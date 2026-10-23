@@ -62,6 +62,23 @@ CONFIG_ENV_VARS = (
     "REVIEW_THRESHOLD",
     "BLOCK_THRESHOLD",
     "PERSIST_FEATURE_SNAPSHOT",
+    "MONITORING_WINDOW_HOURS",
+    "MONITORING_REFERENCE_PATH",
+    "MONITORING_REPORT_DIR",
+    "MONITORING_SAMPLE_LIMIT",
+    "MONITORING_CAPTURE_VALIDATION_FAILURES",
+    "MONITORING_FEATURE_PSI_WARNING",
+    "MONITORING_FEATURE_PSI_ALERT",
+    "MONITORING_SCORE_PSI_WARNING",
+    "MONITORING_SCORE_PSI_ALERT",
+    "MONITORING_KS_WARNING",
+    "MONITORING_KS_ALERT",
+    "MONITORING_MISSING_RATE_WARNING",
+    "MONITORING_MISSING_RATE_ALERT",
+    "MONITORING_VALIDATION_FAILURE_RATE_WARNING",
+    "MONITORING_VALIDATION_FAILURE_RATE_ALERT",
+    "PERFORMANCE_REPORT_DIR",
+    "PERFORMANCE_PERIOD",
 )
 
 EXPECTED_DEFAULT_DSN = "postgresql+psycopg://fraud:change-me@localhost:5432/fraud"
@@ -170,6 +187,61 @@ def test_cost_weights_default_and_must_be_positive(
         load_settings(false_positive_cost=-1)
 
 
+def test_monitoring_defaults_are_bounded_and_configured(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """The monitoring window, sample bound and alert bands have safe local defaults."""
+    settings = load_settings()
+
+    assert settings.monitoring_window_hours == 24
+    assert settings.monitoring_sample_limit == 50_000
+    assert settings.monitoring_capture_validation_failures is True
+    assert not settings.monitoring_reference_path.is_absolute()
+    assert not settings.monitoring_report_dir.is_absolute()
+    assert settings.monitoring_feature_psi_warning < settings.monitoring_feature_psi_alert == 0.25
+    assert settings.monitoring_score_psi_warning < settings.monitoring_score_psi_alert
+    assert settings.monitoring_ks_warning < settings.monitoring_ks_alert
+    assert settings.monitoring_missing_rate_warning < settings.monitoring_missing_rate_alert
+    assert (
+        settings.monitoring_validation_failure_rate_warning
+        < settings.monitoring_validation_failure_rate_alert
+    )
+
+
+def test_performance_defaults_are_safe_and_separate(
+    load_settings: Callable[..., Settings],
+) -> None:
+    """Routine performance reports default to a git-ignored directory and monthly grouping."""
+    settings = load_settings()
+
+    assert not settings.performance_report_dir.is_absolute()
+    assert settings.performance_report_dir == Path("./reports/performance")
+    assert settings.performance_period == "month"
+
+
+@pytest.mark.parametrize(
+    ("warning_field", "alert_field"),
+    [
+        ("monitoring_feature_psi_warning", "monitoring_feature_psi_alert"),
+        ("monitoring_score_psi_warning", "monitoring_score_psi_alert"),
+        ("monitoring_ks_warning", "monitoring_ks_alert"),
+        ("monitoring_missing_rate_warning", "monitoring_missing_rate_alert"),
+        (
+            "monitoring_validation_failure_rate_warning",
+            "monitoring_validation_failure_rate_alert",
+        ),
+    ],
+)
+def test_monitoring_warning_threshold_must_be_below_alert(
+    load_settings: Callable[..., Settings],
+    warning_field: str,
+    alert_field: str,
+) -> None:
+    """A non-positive warning band is rejected at startup, not hidden in analysis code."""
+    with pytest.raises(ValidationError):
+        load_settings(**{warning_field: 0.4, alert_field: 0.4})
+
+
 def test_required_settings_are_all_present(load_settings: Callable[..., Settings]) -> None:
     """Every setting the architecture requires resolves to a usable value by default."""
     settings = load_settings()
@@ -220,6 +292,23 @@ def test_environment_variables_override_defaults(
     monkeypatch.setenv("REVIEW_THRESHOLD", "0.2")
     monkeypatch.setenv("BLOCK_THRESHOLD", "0.8")
     monkeypatch.setenv("PERSIST_FEATURE_SNAPSHOT", "true")
+    monkeypatch.setenv("MONITORING_WINDOW_HOURS", "48")
+    monkeypatch.setenv("MONITORING_REFERENCE_PATH", "/srv/monitoring/reference.json")
+    monkeypatch.setenv("MONITORING_REPORT_DIR", "/srv/monitoring/reports")
+    monkeypatch.setenv("MONITORING_SAMPLE_LIMIT", "1234")
+    monkeypatch.setenv("MONITORING_CAPTURE_VALIDATION_FAILURES", "false")
+    monkeypatch.setenv("MONITORING_FEATURE_PSI_WARNING", "0.08")
+    monkeypatch.setenv("MONITORING_FEATURE_PSI_ALERT", "0.20")
+    monkeypatch.setenv("MONITORING_SCORE_PSI_WARNING", "0.07")
+    monkeypatch.setenv("MONITORING_SCORE_PSI_ALERT", "0.18")
+    monkeypatch.setenv("MONITORING_KS_WARNING", "0.05")
+    monkeypatch.setenv("MONITORING_KS_ALERT", "0.12")
+    monkeypatch.setenv("MONITORING_MISSING_RATE_WARNING", "0.005")
+    monkeypatch.setenv("MONITORING_MISSING_RATE_ALERT", "0.03")
+    monkeypatch.setenv("MONITORING_VALIDATION_FAILURE_RATE_WARNING", "0.01")
+    monkeypatch.setenv("MONITORING_VALIDATION_FAILURE_RATE_ALERT", "0.04")
+    monkeypatch.setenv("PERFORMANCE_REPORT_DIR", "/srv/performance/reports")
+    monkeypatch.setenv("PERFORMANCE_PERIOD", "week")
 
     settings = load_settings()
 
@@ -248,6 +337,23 @@ def test_environment_variables_override_defaults(
     assert settings.review_threshold == 0.2
     assert settings.block_threshold == 0.8
     assert settings.persist_feature_snapshot is True
+    assert settings.monitoring_window_hours == 48
+    assert settings.monitoring_reference_path == Path("/srv/monitoring/reference.json")
+    assert settings.monitoring_report_dir == Path("/srv/monitoring/reports")
+    assert settings.monitoring_sample_limit == 1234
+    assert settings.monitoring_capture_validation_failures is False
+    assert settings.monitoring_feature_psi_warning == 0.08
+    assert settings.monitoring_feature_psi_alert == 0.20
+    assert settings.monitoring_score_psi_warning == 0.07
+    assert settings.monitoring_score_psi_alert == 0.18
+    assert settings.monitoring_ks_warning == 0.05
+    assert settings.monitoring_ks_alert == 0.12
+    assert settings.monitoring_missing_rate_warning == 0.005
+    assert settings.monitoring_missing_rate_alert == 0.03
+    assert settings.monitoring_validation_failure_rate_warning == 0.01
+    assert settings.monitoring_validation_failure_rate_alert == 0.04
+    assert settings.performance_report_dir == Path("/srv/performance/reports")
+    assert settings.performance_period == "week"
     assert settings.sqlalchemy_dsn == PRODUCTION_DSN
 
 

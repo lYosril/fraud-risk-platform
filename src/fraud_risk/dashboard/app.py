@@ -16,8 +16,9 @@ Configuration
 Data honesty
     The dashboard does not ship a demo dataset. When the API is unreachable, the history is
     empty, or a metric is not served by the API, the UI says so instead of substituting
-    synthetic numbers. Model performance metrics are unavailable because the current platform
-    stores predictions but not delayed feedback labels or an evaluation endpoint.
+    synthetic numbers. Routine performance is reported separately from an operator-supplied,
+    verified evaluation extract; the overview does not derive metrics from unlabelled traffic
+    or analyst review state.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from fraud_risk.dashboard.api_client import (
     DashboardApiClient,
     DashboardApiError,
     ModelMetadata,
+    PerformanceSummary,
     Prediction,
     PredictionRecord,
 )
@@ -54,6 +56,13 @@ from fraud_risk.dashboard.transformations import (
     explanation_frame,
     format_percentage,
     fraud_rate,
+    monitoring_feature_frame,
+    monitoring_status_label,
+    monitoring_version_frame,
+    performance_metric_text,
+    performance_segment_frame,
+    performance_status_label,
+    performance_version_frame,
     review_counts,
     review_status_label,
     review_table_frame,
@@ -81,11 +90,15 @@ def main() -> None:
     _render_header(client)
     metadata, metadata_error = _load_metadata(client)
 
-    overview_tab, review_tab, scoring_tab = st.tabs(
-        ["Overview", "Analyst review", "Score a transaction"]
+    overview_tab, performance_tab, monitoring_tab, review_tab, scoring_tab = st.tabs(
+        ["Overview", "Performance", "Monitoring", "Analyst review", "Score a transaction"]
     )
     with overview_tab:
         _render_overview(client, metadata, metadata_error)
+    with performance_tab:
+        _render_performance(client)
+    with monitoring_tab:
+        _render_monitoring(client)
     with review_tab:
         _render_review_workflow(client)
     with scoring_tab:
@@ -144,7 +157,7 @@ def _render_overview(
     metadata: ModelMetadata | None,
     metadata_error: str | None,
 ) -> None:
-    """Render aggregate history, Plotly charts and the unavailable-performance state."""
+    """Render aggregate history, Plotly charts and the separate-performance pointer."""
     st.subheader("Prediction overview")
     if not client.admin_available:
         st.info(
@@ -200,6 +213,227 @@ def _render_overview(
 
     _render_model_performance(metadata, metadata_error)
     _render_recent_predictions(recent)
+
+
+def _render_performance(client: DashboardApiClient) -> None:
+    """Render the latest aggregate delayed-label performance report."""
+    st.subheader("Delayed-label model performance")
+    st.caption(
+        "The latest persisted aggregate report from a separately supplied, scored evaluation "
+        "extract. Analyst review state is not used as ground truth, and no raw row is shown."
+    )
+    if not client.admin_available:
+        st.info(
+            "Performance reports are admin-protected. Set `API_ADMIN_TOKEN` in the dashboard "
+            "environment to read `GET /performance/summary`."
+        )
+        return
+
+    try:
+        summary = client.performance_summary()
+    except DashboardApiError as exc:
+        st.error(f"Could not load the performance summary: {exc}")
+        return
+
+    if not summary.available:
+        st.info(summary.reason or "No performance report is available.")
+        st.caption(
+            "Generate one with `python -m fraud_risk.monitoring performance --path ... "
+            "--threshold ... --label-source ...`."
+        )
+        return
+
+    _render_performance_header(summary)
+    if summary.overall is None:
+        st.info("The report contains no overall metric block.")
+        return
+
+    metrics = summary.overall
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("PR-AUC (primary)", performance_metric_text(metrics.pr_auc))
+    metric_columns[1].metric("ROC-AUC", performance_metric_text(metrics.roc_auc))
+    metric_columns[2].metric("Precision", performance_metric_text(metrics.precision))
+    metric_columns[3].metric("Recall", performance_metric_text(metrics.recall))
+    metric_columns[4].metric("F1", performance_metric_text(metrics.f1))
+    metric_columns[5].metric(
+        "False-positive rate",
+        performance_metric_text(metrics.false_positive_rate),
+    )
+    st.caption(
+        f"{metrics.rows:,} labeled rows · {metrics.positives:,} positives · "
+        f"threshold {metrics.threshold:.6f} · "
+        f"status {performance_status_label(summary.status)}"
+    )
+
+    st.markdown("**By model version**")
+    version_frame = performance_version_frame(summary)
+    if version_frame.empty:
+        st.info("No model-version metrics are available in this report.")
+    else:
+        st.dataframe(version_frame, use_container_width=True, hide_index=True)
+
+    st.markdown("**By model version and evaluation period**")
+    segment_frame = performance_segment_frame(summary)
+    if segment_frame.empty:
+        st.info("No period segments are available in this report.")
+    else:
+        st.dataframe(segment_frame, use_container_width=True, hide_index=True)
+
+    if summary.warnings:
+        with st.expander("Performance warnings", expanded=True):
+            for warning in summary.warnings:
+                st.warning(warning)
+    with st.expander("Performance caveats", expanded=False):
+        for caveat in summary.caveats:
+            st.markdown(f"- {caveat}")
+
+
+def _render_performance_header(summary: PerformanceSummary) -> None:
+    """Render report provenance without exposing the evaluation rows."""
+    generated = (
+        summary.generated_at.strftime("%Y-%m-%d %H:%M:%S %Z") if summary.generated_at else "n/a"
+    )
+    window = (
+        f"{summary.window_start.strftime('%Y-%m-%d %H:%M:%S %Z')} to "
+        f"{summary.window_end.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        if summary.window_start and summary.window_end
+        else "n/a"
+    )
+    st.caption(
+        f"Report `{summary.report_id or 'n/a'}` · generated {generated} · window {window} · "
+        f"period {summary.period or 'n/a'} · labels {summary.label_source or 'n/a'}"
+    )
+    if not summary.labels_verified:
+        st.warning(
+            "The labels are not marked verified. These metrics are provisional and must not "
+            "be treated as confirmed ground truth."
+        )
+
+
+def _render_monitoring(client: DashboardApiClient) -> None:
+    """Render the latest aggregate drift report and its explicit limitations."""
+    st.subheader("Drift monitoring")
+    st.caption(
+        "The latest persisted aggregate report, comparing a configurable window against a "
+        "training reference profile. Feature drift needs opt-in feature snapshots; model "
+        "performance needs delayed ground truth labels."
+    )
+    if not client.admin_available:
+        st.info(
+            "Monitoring reports are admin-protected. Set `API_ADMIN_TOKEN` in the dashboard "
+            "environment to read `GET /monitoring/summary`."
+        )
+        return
+
+    try:
+        summary = client.monitoring_summary()
+    except ApiAuthenticationError as exc:
+        st.error(
+            "The API rejected the administrative token. Check `API_ADMIN_TOKEN` and the "
+            f"API's admin configuration. ({exc.detail})"
+        )
+        return
+    except DashboardApiError as exc:
+        st.error(f"Could not load the monitoring summary: {exc}")
+        return
+
+    if not summary.available:
+        st.info(summary.reason or "No monitoring report is available.")
+        st.caption(
+            "Build the reference from the training split with "
+            "`python -m fraud_risk.models.reference`, then run "
+            "`python -m fraud_risk.monitoring run` to persist a report."
+        )
+        return
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Overall status", monitoring_status_label(summary.status))
+    metric_columns[1].metric("Predictions in window", f"{summary.prediction_count:,}")
+    metric_columns[2].metric(
+        "Score PSI",
+        "n/a" if summary.score_psi is None else f"{summary.score_psi:.4f}",
+    )
+    metric_columns[3].metric("Features with drift", f"{summary.feature_drift_count:,}")
+
+    if summary.prediction_count == 0:
+        st.info(
+            "The monitoring window is empty: no predictions were stored in the configured "
+            "period. No score or feature distribution is fabricated."
+        )
+    if summary.window_start is not None and summary.window_end is not None:
+        generated = (
+            summary.generated_at.strftime("%Y-%m-%d %H:%M:%S %Z") if summary.generated_at else "n/a"
+        )
+        st.caption(
+            f"Window {summary.window_start.strftime('%Y-%m-%d %H:%M:%S %Z')} to "
+            f"{summary.window_end.strftime('%Y-%m-%d %H:%M:%S %Z')} · generated {generated}"
+        )
+
+    status_columns = st.columns(3)
+    status_columns[0].metric("Data drift", monitoring_status_label(summary.data_drift_status))
+    status_columns[1].metric("Data quality", monitoring_status_label(summary.data_quality_status))
+    status_columns[2].metric(
+        "Model performance", monitoring_status_label(summary.performance_status)
+    )
+    st.info(
+        "Data drift is not model-performance degradation. "
+        + (summary.performance_reason or "No performance metric is available.")
+    )
+
+    validation_columns = st.columns(3)
+    validation_columns[0].metric(
+        "Validation failures",
+        f"{summary.validation_failure_count:,}",
+    )
+    validation_columns[1].metric(
+        "Validation failure rate",
+        format_percentage(summary.validation_failure_rate),
+    )
+    validation_columns[2].metric(
+        "Snapshots in sample",
+        f"{summary.feature_snapshot_count:,}",
+    )
+
+    st.markdown("**Feature drift**")
+    feature_frame = monitoring_feature_frame(summary)
+    if feature_frame.empty:
+        st.info(
+            "Feature drift is unavailable for this window. Enable "
+            "`PERSIST_FEATURE_SNAPSHOT` and collect a new window to measure it."
+        )
+    else:
+        st.dataframe(
+            feature_frame,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "feature": st.column_config.TextColumn("Feature"),
+                "status": st.column_config.TextColumn("Status"),
+                "psi": st.column_config.NumberColumn("PSI", format="%.4f"),
+                "ks_statistic": st.column_config.NumberColumn("KS", format="%.4f"),
+                "missing_rate": st.column_config.TextColumn("Missing rate"),
+                "sample_count": st.column_config.NumberColumn("Rows"),
+            },
+        )
+    st.caption(
+        "PSI uses reference-derived quantile bins. Missing values are tracked separately; "
+        "KS is approximate because the reference stores a quantile sample."
+    )
+
+    st.markdown("**Model-version usage**")
+    version_frame = monitoring_version_frame(summary)
+    if version_frame.empty:
+        st.caption("No model-version usage in this window.")
+    else:
+        st.dataframe(version_frame, use_container_width=True, hide_index=True)
+
+    if summary.caveats:
+        with st.expander("Monitoring caveats", expanded=True):
+            for caveat in summary.caveats:
+                st.markdown(f"- {caveat}")
+    if summary.raw_report is not None:
+        with st.expander("Machine-readable report"):
+            st.json(dict(summary.raw_report))
 
 
 def _render_review_workflow(client: DashboardApiClient) -> None:
@@ -462,9 +696,9 @@ def _render_model_performance(
         st.caption(f"Model metadata unavailable: {metadata_error}")
 
     st.info(
-        "Unavailable: this platform does not yet collect delayed feedback labels or expose an "
-        "evaluation endpoint. PR-AUC, recall and other performance metrics are therefore not "
-        "shown, and no illustrative metric is substituted."
+        "Routine delayed-label performance is reported separately in the Performance tab from "
+        "a scored evaluation extract. This overview only reads stored predictions and review "
+        "state, so it does not derive a metric from unlabelled traffic."
     )
 
 

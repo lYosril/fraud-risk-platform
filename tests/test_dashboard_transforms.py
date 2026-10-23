@@ -5,11 +5,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from fraud_risk.dashboard.api_client import (
     Explanation,
     ExplanationContribution,
+    MonitoringFeatureDrift,
+    MonitoringSummary,
+    MonitoringVersionUsage,
     OverviewSummary,
+    PerformanceMetric,
+    PerformanceMetrics,
+    PerformanceSegment,
+    PerformanceSummary,
+    PerformanceVersionSummary,
     PredictionRecord,
     RiskBin,
 )
@@ -19,6 +28,13 @@ from fraud_risk.dashboard.transformations import (
     explanation_frame,
     format_percentage,
     fraud_rate,
+    monitoring_feature_frame,
+    monitoring_status_label,
+    monitoring_version_frame,
+    performance_metric_text,
+    performance_segment_frame,
+    performance_status_label,
+    performance_version_frame,
     recent_predictions_frame,
     review_counts,
     review_status_label,
@@ -70,6 +86,276 @@ def make_record(
         decision=decision or ("fraud" if risk_score >= 0.5 else "legitimate"),
         review_status=review_status,
     )
+
+
+def make_monitoring_summary() -> MonitoringSummary:
+    return MonitoringSummary(
+        available=True,
+        reason=None,
+        report_id="report-1",
+        generated_at=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+        window_start=datetime(2026, 10, 22, 12, 0, tzinfo=UTC),
+        window_end=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+        status="warning",
+        data_drift_status="warning",
+        data_quality_status="ok",
+        performance_status="unavailable",
+        performance_reason="Delayed labels are unavailable.",
+        prediction_count=120,
+        validation_failure_count=2,
+        feature_snapshot_count=100,
+        feature_drift_count=1,
+        score_status="ok",
+        score_psi=0.02,
+        score_ks_statistic=0.03,
+        missing_overall_rate=0.0,
+        validation_failure_rate=0.016,
+        features=(
+            MonitoringFeatureDrift(
+                feature="V1",
+                status="warning",
+                psi=0.13,
+                ks_statistic=0.08,
+                missing_rate=0.0,
+                sample_count=100,
+            ),
+        ),
+        model_versions=(
+            MonitoringVersionUsage(
+                model_version="version-1",
+                total=120,
+                fraud=20,
+                legitimate=100,
+                share=1.0,
+            ),
+        ),
+        caveats=("Data drift is not performance degradation.",),
+        raw_report=None,
+    )
+
+
+def make_performance_metrics() -> PerformanceMetrics:
+    return PerformanceMetrics(
+        rows=4,
+        positives=2,
+        negatives=2,
+        threshold=0.5,
+        true_negatives=1,
+        false_positives=1,
+        false_negatives=1,
+        true_positives=1,
+        precision=PerformanceMetric(0.5, True, None),
+        recall=PerformanceMetric(0.5, True, None),
+        f1=PerformanceMetric(0.5, True, None),
+        pr_auc=PerformanceMetric(0.833333, True, None),
+        roc_auc=PerformanceMetric(0.75, True, None),
+        false_positive_rate=PerformanceMetric(0.5, True, None),
+    )
+
+
+def make_performance_summary() -> PerformanceSummary:
+    metrics = make_performance_metrics()
+    return PerformanceSummary(
+        available=True,
+        reason=None,
+        report_id="performance-1",
+        generated_at=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+        window_start=datetime(2026, 10, 1, tzinfo=UTC),
+        window_end=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+        threshold=0.5,
+        period="month",
+        label_source="verified_chargebacks",
+        labels_verified=True,
+        status="ok",
+        row_count=4,
+        model_version_count=1,
+        segment_count=1,
+        overall=metrics,
+        model_versions=(PerformanceVersionSummary(model_version="version-1", metrics=metrics),),
+        segments=(
+            PerformanceSegment(
+                model_version="version-1",
+                period_label="2026-10",
+                period_start=datetime(2026, 10, 1, tzinfo=UTC),
+                period_end=datetime(2026, 11, 1, tzinfo=UTC),
+                metrics=metrics,
+            ),
+        ),
+        warnings=(),
+        caveats=("Labels can arrive late.",),
+        raw_report=None,
+    )
+
+
+def test_monitoring_tables_preserve_report_order_and_status_labels() -> None:
+    summary = make_monitoring_summary()
+
+    feature_frame = monitoring_feature_frame(summary)
+    version_frame = monitoring_version_frame(summary)
+
+    assert list(feature_frame.columns) == [
+        "feature",
+        "status",
+        "psi",
+        "ks_statistic",
+        "missing_rate",
+        "sample_count",
+    ]
+    assert feature_frame.iloc[0]["status"] == "Warning"
+    assert feature_frame.iloc[0]["psi"] == pytest.approx(0.13)
+    assert feature_frame.iloc[0]["missing_rate"] == "0.00%"
+    assert list(version_frame.columns) == [
+        "model_version",
+        "total",
+        "fraud",
+        "legitimate",
+        "share",
+    ]
+    assert version_frame.iloc[0]["share"] == "100.00%"
+    assert monitoring_status_label("alert") == "Alert"
+    assert monitoring_status_label(None) == "Unavailable"
+
+
+def test_performance_tables_preserve_undefined_metrics_and_period_labels() -> None:
+    summary = make_performance_summary()
+
+    version_frame = performance_version_frame(summary)
+    segment_frame = performance_segment_frame(summary)
+
+    assert list(version_frame.columns) == [
+        "model_version",
+        "rows",
+        "positives",
+        "precision",
+        "recall",
+        "f1",
+        "pr_auc",
+        "roc_auc",
+        "false_positive_rate",
+    ]
+    assert version_frame.iloc[0]["model_version"] == "version-1"
+    assert version_frame.iloc[0]["pr_auc"] == "83.33%"
+    assert list(segment_frame.columns) == [
+        "model_version",
+        "period",
+        "rows",
+        "positives",
+        "precision",
+        "recall",
+        "f1",
+        "pr_auc",
+        "roc_auc",
+        "false_positive_rate",
+    ]
+    assert segment_frame.iloc[0]["period"] == "2026-10"
+    assert summary.overall is not None
+    assert performance_metric_text(summary.overall.precision) == "50.00%"
+    assert performance_status_label("ok") == "Complete"
+    assert performance_status_label("partial") == "Partial / provisional"
+    assert performance_status_label(None) == "Unavailable"
+
+
+def test_performance_tables_render_undefined_metrics_as_undefined() -> None:
+    summary = make_performance_summary()
+    undefined = PerformanceMetric(
+        None,
+        False,
+        "no rows were predicted positive at this threshold",
+    )
+    assert summary.overall is not None
+    metrics = PerformanceMetrics(
+        rows=summary.overall.rows,
+        positives=summary.overall.positives,
+        negatives=summary.overall.negatives,
+        threshold=summary.overall.threshold,
+        true_negatives=summary.overall.true_negatives,
+        false_positives=summary.overall.false_positives,
+        false_negatives=summary.overall.false_negatives,
+        true_positives=summary.overall.true_positives,
+        precision=undefined,
+        recall=summary.overall.recall,
+        f1=summary.overall.f1,
+        pr_auc=summary.overall.pr_auc,
+        roc_auc=summary.overall.roc_auc,
+        false_positive_rate=summary.overall.false_positive_rate,
+    )
+    frame = performance_version_frame(
+        PerformanceSummary(
+            available=True,
+            reason=None,
+            report_id=summary.report_id,
+            generated_at=summary.generated_at,
+            window_start=summary.window_start,
+            window_end=summary.window_end,
+            threshold=summary.threshold,
+            period=summary.period,
+            label_source=summary.label_source,
+            labels_verified=summary.labels_verified,
+            status=summary.status,
+            row_count=summary.row_count,
+            model_version_count=summary.model_version_count,
+            segment_count=summary.segment_count,
+            overall=metrics,
+            model_versions=(PerformanceVersionSummary("version-1", metrics),),
+            segments=summary.segments,
+            warnings=summary.warnings,
+            caveats=summary.caveats,
+            raw_report=None,
+        )
+    )
+
+    assert frame.iloc[0]["precision"] == "undefined"
+    assert performance_metric_text(undefined) == "undefined"
+
+
+def test_empty_performance_frames_keep_their_display_schema() -> None:
+    summary = PerformanceSummary(
+        available=False,
+        reason="No performance report is available.",
+        report_id=None,
+        generated_at=None,
+        window_start=None,
+        window_end=None,
+        threshold=None,
+        period=None,
+        label_source=None,
+        labels_verified=False,
+        status=None,
+        row_count=0,
+        model_version_count=0,
+        segment_count=0,
+        overall=None,
+        model_versions=(),
+        segments=(),
+        warnings=(),
+        caveats=(),
+        raw_report=None,
+    )
+
+    assert list(performance_version_frame(summary).columns) == [
+        "model_version",
+        "rows",
+        "positives",
+        "precision",
+        "recall",
+        "f1",
+        "pr_auc",
+        "roc_auc",
+        "false_positive_rate",
+    ]
+    assert list(performance_segment_frame(summary).columns) == [
+        "model_version",
+        "period",
+        "rows",
+        "positives",
+        "precision",
+        "recall",
+        "f1",
+        "pr_auc",
+        "roc_auc",
+        "false_positive_rate",
+    ]
+    assert performance_metric_text(None) == "undefined"
 
 
 def test_fraud_rate_and_percentage_preserve_the_empty_state() -> None:

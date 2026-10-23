@@ -24,9 +24,13 @@ from fraud_risk.config import Settings
 from fraud_risk.db.repository import PredictionRepository
 from fraud_risk.db.session import DB_SESSION_FACTORY_STATE_KEY
 from fraud_risk.models.inference import FraudInferenceService
+from fraud_risk.monitoring.events import MonitoringEventRecorder
+from fraud_risk.monitoring.performance_repository import PerformanceRepository
+from fraud_risk.monitoring.repository import MonitoringRepository
 
 SETTINGS_STATE_KEY = "settings"
 INFERENCE_STATE_KEY = "inference_service"
+MONITORING_RECORDER_STATE_KEY = "monitoring_recorder"
 
 # `auto_error=False` lets us return one stable 401 shape for both a missing header and a
 # malformed scheme, instead of FastAPI's default 403 for a missing bearer token.
@@ -75,6 +79,29 @@ def get_prediction_repository(
     return PredictionRepository(session)
 
 
+def get_monitoring_repository(
+    session: Annotated[Session, Depends(get_db_session)],
+) -> MonitoringRepository:
+    """Return a session-bound monitoring repository."""
+    return MonitoringRepository(session)
+
+
+def get_performance_repository(
+    session: Annotated[Session, Depends(get_db_session)],
+) -> PerformanceRepository:
+    """Return a session-bound delayed-label performance repository."""
+    return PerformanceRepository(session)
+
+
+def get_monitoring_recorder(request: Request) -> MonitoringEventRecorder:
+    """Return the process-wide validation-failure recorder."""
+    recorder = getattr(request.app.state, MONITORING_RECORDER_STATE_KEY, None)
+    if not isinstance(recorder, MonitoringEventRecorder):
+        msg = "a monitoring event recorder was not configured by the app factory"
+        raise RuntimeError(msg)
+    return recorder
+
+
 def require_admin_api_token(
     settings: Annotated[Settings, Depends(get_app_settings)],
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
@@ -109,10 +136,14 @@ def require_admin_api_token(
 
 __all__ = [
     "INFERENCE_STATE_KEY",
+    "MONITORING_RECORDER_STATE_KEY",
     "SETTINGS_STATE_KEY",
     "get_app_settings",
     "get_db_session",
     "get_inference_service",
+    "get_monitoring_recorder",
+    "get_monitoring_repository",
+    "get_performance_repository",
     "get_prediction_repository",
     "require_admin_api_token",
 ]

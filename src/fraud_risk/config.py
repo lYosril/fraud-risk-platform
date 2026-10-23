@@ -33,6 +33,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["local", "test", "staging", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+PerformancePeriod = Literal["day", "week", "month"]
 
 #: Values published in the committed `.env.example`. Acceptable for local development,
 #: refused in production so that a placeholder can never silently reach a real deployment.
@@ -136,6 +137,41 @@ class Settings(BaseSettings):
     # Persisting input vectors enables drift analysis but costs storage and privacy
     # surface (docs/ARCHITECTURE.md §13.4). Off by default.
     persist_feature_snapshot: bool = False
+
+    # -- Monitoring ----------------------------------------------------------
+    # One report covers the most recent N hours of stored predictions and validation
+    # failures. The reference profile is a compact aggregate built from the training split;
+    # it never contains raw training rows. Both paths are git-ignored by default.
+    monitoring_window_hours: int = Field(default=24, ge=1, le=24 * 90)
+    monitoring_reference_path: Path = Path("./reports/monitoring/reference_profile.json")
+    monitoring_report_dir: Path = Path("./reports/monitoring")
+    # Bound the rows loaded for score/feature distributions. Aggregate counts (prediction
+    # volume, model-version usage, decision mix, review states) are still computed exactly.
+    monitoring_sample_limit: int = Field(default=50_000, ge=100, le=1_000_000)
+    # Record request-validation failures as count-only monitoring events. No payload, header
+    # or feature value is stored. Operators may turn this off where the extra write is
+    # undesirable, but then the validation-failure signal is unavailable.
+    monitoring_capture_validation_failures: bool = True
+    # Starting thresholds. PSI bands follow the common 0.10 / 0.25 convention; KS and
+    # missing/failure-rate bands are conservative operational defaults documented in
+    # docs/MONITORING.md. They are configuration, never constants in analysis code.
+    monitoring_feature_psi_warning: float = Field(default=0.10, ge=0.0, le=1.0)
+    monitoring_feature_psi_alert: float = Field(default=0.25, ge=0.0, le=1.0)
+    monitoring_score_psi_warning: float = Field(default=0.10, ge=0.0, le=1.0)
+    monitoring_score_psi_alert: float = Field(default=0.25, ge=0.0, le=1.0)
+    monitoring_ks_warning: float = Field(default=0.10, ge=0.0, le=1.0)
+    monitoring_ks_alert: float = Field(default=0.20, ge=0.0, le=1.0)
+    monitoring_missing_rate_warning: float = Field(default=0.01, ge=0.0, le=1.0)
+    monitoring_missing_rate_alert: float = Field(default=0.05, ge=0.0, le=1.0)
+    monitoring_validation_failure_rate_warning: float = Field(default=0.02, ge=0.0, le=1.0)
+    monitoring_validation_failure_rate_alert: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    # -- Performance reporting ----------------------------------------------
+    # Routine, delayed-label performance reports are written here. They are separate from
+    # the one-time final test evaluation under artifacts/final_evaluation; generated JSON is
+    # git-ignored. The reporting period groups scored rows before metrics are computed.
+    performance_report_dir: Path = Path("./reports/performance")
+    performance_period: PerformancePeriod = "month"
 
     # -- Field validation ----------------------------------------------------
     @field_validator("api_prefix")
@@ -245,6 +281,41 @@ class Settings(BaseSettings):
                 f"origins for {self.app_env}"
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_monitoring_thresholds(self) -> Settings:
+        """Require a non-empty warning band for every monitoring signal."""
+        pairs = (
+            (
+                "feature PSI",
+                self.monitoring_feature_psi_warning,
+                self.monitoring_feature_psi_alert,
+            ),
+            (
+                "score PSI",
+                self.monitoring_score_psi_warning,
+                self.monitoring_score_psi_alert,
+            ),
+            ("KS", self.monitoring_ks_warning, self.monitoring_ks_alert),
+            (
+                "missing rate",
+                self.monitoring_missing_rate_warning,
+                self.monitoring_missing_rate_alert,
+            ),
+            (
+                "validation failure rate",
+                self.monitoring_validation_failure_rate_warning,
+                self.monitoring_validation_failure_rate_alert,
+            ),
+        )
+        for label, warning, alert in pairs:
+            if warning >= alert:
+                msg = (
+                    f"{label} warning threshold must be strictly below its alert threshold "
+                    f"(got {warning} >= {alert})"
+                )
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

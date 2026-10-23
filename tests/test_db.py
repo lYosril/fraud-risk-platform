@@ -27,7 +27,14 @@ from starlette.requests import Request
 
 from fraud_risk.api.dependencies import get_db_session
 from fraud_risk.config import get_settings
-from fraud_risk.db.models import Prediction, PredictionDecision, ReviewStatus
+from fraud_risk.db.models import (
+    DriftReport,
+    MonitoringEvent,
+    PerformanceReport,
+    Prediction,
+    PredictionDecision,
+    ReviewStatus,
+)
 from fraud_risk.db.repository import (
     InvalidReviewTransitionError,
     PersistenceError,
@@ -98,6 +105,106 @@ def test_prediction_table_has_named_check_constraints() -> None:
         "ck_predictions_threshold_range",
         "ck_predictions_decision_allowed",
         "ck_predictions_review_status_allowed",
+    } <= check_constraints
+
+
+def test_monitoring_tables_store_aggregates_not_raw_payloads() -> None:
+    event_columns = set(MonitoringEvent.__table__.columns.keys())
+    report_columns = set(DriftReport.__table__.columns.keys())
+
+    assert event_columns == {
+        "event_id",
+        "created_at",
+        "event_type",
+        "endpoint",
+        "reason_code",
+        "failure_count",
+    }
+    assert report_columns == {
+        "report_id",
+        "generated_at",
+        "window_start",
+        "window_end",
+        "reference_id",
+        "status",
+        "data_drift_status",
+        "data_quality_status",
+        "prediction_count",
+        "validation_failure_count",
+        "feature_snapshot_count",
+        "feature_drift_count",
+        "payload",
+    }
+    assert "transaction_id" not in event_columns
+    assert "transaction_id" not in report_columns
+    assert "features" not in event_columns
+    assert "features" not in report_columns
+
+
+def test_monitoring_tables_have_named_check_constraints() -> None:
+    event_constraints = {
+        constraint.name
+        for constraint in cast(Table, MonitoringEvent.__table__).constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    report_constraints = {
+        constraint.name
+        for constraint in cast(Table, DriftReport.__table__).constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert {
+        "ck_monitoring_events_event_type_allowed",
+        "ck_monitoring_events_failure_count_positive",
+    } <= event_constraints
+    assert {
+        "ck_drift_reports_status_allowed",
+        "ck_drift_reports_data_drift_status_allowed",
+        "ck_drift_reports_data_quality_status_allowed",
+        "ck_drift_reports_window_order",
+    } <= report_constraints
+
+
+def test_performance_reports_store_aggregates_not_raw_labels_or_rows() -> None:
+    table = cast(Table, PerformanceReport.__table__)
+    columns = set(table.columns.keys())
+
+    assert columns == {
+        "report_id",
+        "generated_at",
+        "window_start",
+        "window_end",
+        "row_count",
+        "model_version_count",
+        "segment_count",
+        "threshold",
+        "period",
+        "labels_verified",
+        "label_source",
+        "payload",
+    }
+    assert "transaction_id" not in columns
+    assert "features" not in columns
+    assert "risk_score" not in columns
+    assert "is_fraud" not in columns
+    assert "review_status" not in columns
+
+
+def test_performance_reports_have_named_check_constraints() -> None:
+    table = cast(Table, PerformanceReport.__table__)
+    check_constraints = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert {
+        "ck_performance_reports_row_count_positive",
+        "ck_performance_reports_model_version_count_positive",
+        "ck_performance_reports_segment_count_positive",
+        "ck_performance_reports_threshold_range",
+        "ck_performance_reports_period_allowed",
+        "ck_performance_reports_window_order",
     } <= check_constraints
 
 
@@ -467,7 +574,7 @@ def _alembic_config() -> Config:
 def test_alembic_has_exactly_one_head() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
-    assert script.get_heads() == ["0001_create_predictions"]
+    assert script.get_heads() == ["0003_create_performance_reports"]
 
 
 def test_offline_migration_renders_the_prediction_schema(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -489,8 +596,13 @@ def test_offline_migration_renders_the_prediction_schema(monkeypatch: pytest.Mon
     assert "CREATE TABLE predictions" in sql
     for column in EXPECTED_COLUMNS:
         assert column in sql
+    assert "CREATE TABLE monitoring_events" in sql
+    assert "CREATE TABLE drift_reports" in sql
     assert "CREATE INDEX ix_predictions_created_at" in sql
     assert "CREATE INDEX ix_predictions_transaction_id" in sql
+    assert "CREATE INDEX ix_monitoring_events_created_at" in sql
+    assert "CREATE INDEX ix_drift_reports_generated_at" in sql
     assert "ck_predictions_risk_score_range" in sql
     assert "ck_predictions_review_status_allowed" in sql
+    assert "ck_drift_reports_window_order" in sql
     assert "ck_predictions_ck_predictions" not in sql

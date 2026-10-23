@@ -1,4 +1,4 @@
-"""ORM models for prediction persistence.
+"""ORM models for prediction and monitoring persistence.
 
 Responsibility
     Persist the prediction metadata the API and dashboard need: a UUID, timestamp,
@@ -6,14 +6,18 @@ Responsibility
     Raw transaction features are *not* stored unless the operator explicitly enables the
     opt-in snapshot, which is off by default.
 
+    Monitoring adds two aggregate-only tables: ``monitoring_events`` records count-only input
+    validation failures, and ``drift_reports`` stores one machine-readable drift report per
+    window. Neither table stores a request payload or a transaction feature row.
+
 What this module deliberately does not do
     It does not create the schema. Alembic owns migrations; the application never calls
-    ``metadata.create_all()``. It also does not implement feedback labels or drift reports,
-    which remain later milestones.
+    ``metadata.create_all()``. Feedback labels remain a later milestone; analyst review state
+    on ``predictions`` is not a replacement for complete delayed ground truth.
 
 Status
-    ``predictions`` is implemented. ``feedback_labels`` and ``drift_reports`` are still
-    planned; see ``docs/ROADMAP.md``.
+    ``predictions``, ``monitoring_events`` and ``drift_reports`` are implemented; see
+    ``docs/ROADMAP.md`` (M8).
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, Float, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -98,4 +102,137 @@ class Prediction(Base):
     feature_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
-__all__ = ["Prediction", "PredictionDecision", "ReviewStatus"]
+class MonitoringEvent(Base):
+    """Count-only input validation failures, with no payload or identifier.
+
+    One row aggregates an event count for an endpoint and safe reason code. This keeps the
+    write volume bounded when a client sends many malformed requests, and means the API never
+    needs to persist a rejected body.
+    """
+
+    __tablename__ = "monitoring_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('input_validation_failure')",
+            name="event_type_allowed",
+        ),
+        CheckConstraint("failure_count >= 1", name="failure_count_positive"),
+    )
+
+    event_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(256), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class DriftReport(Base):
+    """One persisted monitoring run with its aggregate summary and full JSON report."""
+
+    __tablename__ = "drift_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok', 'warning', 'alert', 'unavailable')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "data_drift_status IN ('ok', 'warning', 'alert', 'unavailable')",
+            name="data_drift_status_allowed",
+        ),
+        CheckConstraint(
+            "data_quality_status IN ('ok', 'warning', 'alert', 'unavailable')",
+            name="data_quality_status_allowed",
+        ),
+        CheckConstraint("prediction_count >= 0", name="prediction_count_non_negative"),
+        CheckConstraint(
+            "validation_failure_count >= 0",
+            name="validation_failure_count_non_negative",
+        ),
+        CheckConstraint(
+            "feature_snapshot_count >= 0",
+            name="feature_snapshot_count_non_negative",
+        ),
+        CheckConstraint("feature_drift_count >= 0", name="feature_drift_count_non_negative"),
+        CheckConstraint("window_end > window_start", name="window_order"),
+    )
+
+    report_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    data_drift_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    data_quality_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    prediction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    validation_failure_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    feature_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    feature_drift_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Aggregate report only: no raw transaction, identifier or feature row is stored here.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class PerformanceReport(Base):
+    """One persisted delayed-label performance run with its aggregate JSON report."""
+
+    __tablename__ = "performance_reports"
+    __table_args__ = (
+        CheckConstraint("row_count > 0", name="row_count_positive"),
+        CheckConstraint(
+            "model_version_count >= 1",
+            name="model_version_count_positive",
+        ),
+        CheckConstraint("segment_count >= 1", name="segment_count_positive"),
+        CheckConstraint(
+            "threshold >= 0 AND threshold <= 1",
+            name="threshold_range",
+        ),
+        CheckConstraint(
+            "period IN ('day', 'week', 'month')",
+            name="period_allowed",
+        ),
+        CheckConstraint("window_end >= window_start", name="window_order"),
+    )
+
+    report_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_version_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    segment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    period: Mapped[str] = mapped_column(String(8), nullable=False)
+    labels_verified: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    label_source: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Aggregate report only: no feature row, transaction identifier or raw label is stored.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+__all__ = [
+    "DriftReport",
+    "MonitoringEvent",
+    "PerformanceReport",
+    "Prediction",
+    "PredictionDecision",
+    "ReviewStatus",
+]

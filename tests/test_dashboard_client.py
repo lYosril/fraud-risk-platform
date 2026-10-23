@@ -151,6 +151,174 @@ def summary_payload() -> dict[str, Any]:
     }
 
 
+def performance_metric(value: float | None, *, reason: str | None = None) -> dict[str, Any]:
+    return {"value": value, "defined": value is not None, "reason": reason}
+
+
+def performance_metrics() -> dict[str, Any]:
+    return {
+        "rows": 4,
+        "positives": 2,
+        "negatives": 2,
+        "threshold": 0.5,
+        "confusion_matrix": {
+            "true_negative": 1,
+            "false_positive": 1,
+            "false_negative": 1,
+            "true_positive": 1,
+        },
+        "precision": performance_metric(0.5),
+        "recall": performance_metric(0.5),
+        "f1": performance_metric(0.5),
+        "pr_auc": performance_metric(0.833333),
+        "roc_auc": performance_metric(0.75),
+        "false_positive_rate": performance_metric(0.5),
+    }
+
+
+def performance_payload() -> dict[str, Any]:
+    return {
+        "available": True,
+        "reason": None,
+        "report": {
+            "schema_version": 1,
+            "report_id": "00000000-0000-0000-0000-000000000020",
+            "generated_at": "2026-10-23T12:00:00Z",
+            "status": "ok",
+            "summary": {
+                "status": "ok",
+                "row_count": 4,
+                "dataset_row_count": 4,
+                "rows_excluded_by_window": 0,
+                "model_version_count": 1,
+                "segment_count": 1,
+                "threshold": 0.5,
+                "period": "month",
+                "labels_verified": True,
+                "undefined_overall_metrics": [],
+                "warnings": [],
+            },
+            "window": {
+                "start": "2026-10-01T00:00:00Z",
+                "end": "2026-10-23T12:00:00Z",
+                "requested_start": None,
+                "requested_end": None,
+                "period": "month",
+                "hours": 540.0,
+            },
+            "evaluation": {
+                "threshold": 0.5,
+                "period": "month",
+                "label_source": "verified_chargebacks",
+                "labels_verified": True,
+                "label_provenance": {
+                    "source": "verified_chargebacks",
+                    "verified": True,
+                    "analyst_review_status_used": False,
+                    "target_column": "is_fraud",
+                    "note": "Only is_fraud is used.",
+                },
+                "score_source": "supplied at prediction time",
+            },
+            "overall": performance_metrics(),
+            "by_model_version": [
+                {"model_version": "version-1", **performance_metrics()},
+            ],
+            "segments": [
+                {
+                    "model_version": "version-1",
+                    "period": {
+                        "label": "2026-10",
+                        "start": "2026-10-01T00:00:00Z",
+                        "end": "2026-11-01T00:00:00Z",
+                        "end_inclusive": False,
+                    },
+                    **performance_metrics(),
+                }
+            ],
+            "metric_definitions": {},
+            "caveats": ["Labels can arrive late."],
+        },
+    }
+
+
+def monitoring_payload() -> dict[str, Any]:
+    return {
+        "available": True,
+        "reason": None,
+        "report": {
+            "schema_version": 1,
+            "report_id": "00000000-0000-0000-0000-000000000010",
+            "generated_at": "2026-10-23T12:00:00Z",
+            "window": {
+                "start": "2026-10-22T12:00:00Z",
+                "end": "2026-10-23T12:00:00Z",
+                "hours": 24.0,
+            },
+            "summary": {
+                "status": "warning",
+                "data_drift_status": "warning",
+                "data_quality_status": "ok",
+                "performance_status": "unavailable",
+                "reason": "Feature drift is available.",
+                "prediction_count": 120,
+                "validation_failure_count": 2,
+                "feature_snapshot_count": 100,
+                "feature_drift_count": 1,
+            },
+            "feature_drift": {
+                "available": True,
+                "status": "warning",
+                "features": [
+                    {
+                        "feature": "V1",
+                        "available": True,
+                        "status": "warning",
+                        "psi": 0.13,
+                        "ks_statistic": 0.08,
+                        "ks_p_value": 0.01,
+                        "missing_rate": 0.0,
+                        "sample_count": 100,
+                    }
+                ],
+            },
+            "missing_values": {
+                "available": True,
+                "status": "ok",
+                "overall_missing_rate": 0.0,
+                "features": [],
+            },
+            "score_drift": {
+                "available": True,
+                "status": "ok",
+                "psi": 0.02,
+                "ks_statistic": 0.03,
+            },
+            "validation_failures": {"status": "ok", "count": 2, "rate": 0.016},
+            "traffic": {
+                "predictions": 120,
+                "sampled_predictions": 100,
+                "sample_truncated": True,
+                "model_versions": [
+                    {
+                        "model_version": "version-1",
+                        "total": 120,
+                        "fraud": 20,
+                        "legitimate": 100,
+                        "share": 1.0,
+                    }
+                ],
+            },
+            "performance": {
+                "available": False,
+                "status": "unavailable",
+                "reason": "Delayed ground-truth labels are unavailable.",
+            },
+            "caveats": ["Data drift is not performance degradation."],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # URLs, auth and transport failures
 # ---------------------------------------------------------------------------
@@ -357,6 +525,155 @@ def test_summary_and_history_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None
     assert len(history) == 1
     assert history[0].review_status == "pending"
     assert history[0].created_at.tzinfo is not None
+
+
+def test_monitoring_summary_is_parsed_with_admin_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = patch_opener(monkeypatch, response=FakeResponse(monitoring_payload()))
+
+    summary = make_client(admin_token=ADMIN_TOKEN).monitoring_summary()
+
+    assert calls[0][0].full_url == f"{BASE_URL}/api/v1/monitoring/summary"
+    assert calls[0][0].get_header("Authorization") == f"Bearer {ADMIN_TOKEN}"
+    assert summary.available is True
+    assert summary.status == "warning"
+    assert summary.data_drift_status == "warning"
+    assert summary.performance_status == "unavailable"
+    assert "Delayed ground-truth" in (summary.performance_reason or "")
+    assert summary.prediction_count == 120
+    assert summary.validation_failure_count == 2
+    assert summary.feature_drift_count == 1
+    assert summary.score_psi == pytest.approx(0.02)
+    assert summary.features[0].feature == "V1"
+    assert summary.features[0].psi == pytest.approx(0.13)
+    assert summary.model_versions[0].model_version == "version-1"
+    assert summary.model_versions[0].total == 120
+    assert summary.raw_report is not None
+    assert summary.raw_report["schema_version"] == 1
+
+
+def test_monitoring_summary_preserves_the_unavailable_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_opener(
+        monkeypatch,
+        response=FakeResponse(
+            {"available": False, "reason": "No monitoring report is available.", "report": None}
+        ),
+    )
+
+    summary = make_client(admin_token=ADMIN_TOKEN).monitoring_summary()
+
+    assert summary.available is False
+    assert summary.reason == "No monitoring report is available."
+    assert summary.status is None
+    assert summary.features == ()
+    assert summary.model_versions == ()
+    assert summary.raw_report is None
+
+
+def test_monitoring_summary_rejects_a_malformed_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = monitoring_payload()
+    report = payload["report"]
+    assert isinstance(report, dict)
+    summary = report["summary"]
+    assert isinstance(summary, dict)
+    del summary["prediction_count"]
+    patch_opener(monkeypatch, response=FakeResponse(payload))
+
+    with pytest.raises(ApiResponseError, match="prediction_count"):
+        make_client(admin_token=ADMIN_TOKEN).monitoring_summary()
+
+
+def test_performance_summary_is_parsed_with_admin_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = patch_opener(monkeypatch, response=FakeResponse(performance_payload()))
+
+    summary = make_client(admin_token=ADMIN_TOKEN).performance_summary()
+
+    assert calls[0][0].full_url == f"{BASE_URL}/api/v1/performance/summary"
+    assert calls[0][0].get_header("Authorization") == f"Bearer {ADMIN_TOKEN}"
+    assert summary.available is True
+    assert summary.status == "ok"
+    assert summary.labels_verified is True
+    assert summary.row_count == 4
+    assert summary.model_version_count == 1
+    assert summary.segment_count == 1
+    assert summary.overall is not None
+    assert summary.overall.pr_auc.value == pytest.approx(0.833333)
+    assert summary.overall.true_positives == 1
+    assert summary.overall.false_positive_rate.value == pytest.approx(0.5)
+    assert summary.model_versions[0].model_version == "version-1"
+    assert summary.segments[0].period_label == "2026-10"
+    assert summary.segments[0].period_end > summary.segments[0].period_start
+    assert summary.raw_report is not None
+    assert summary.raw_report["schema_version"] == 1
+
+
+def test_performance_summary_preserves_undefined_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = performance_payload()
+    report = payload["report"]
+    assert isinstance(report, dict)
+    overall = report["overall"]
+    assert isinstance(overall, dict)
+    overall["precision"] = {
+        "value": None,
+        "defined": False,
+        "reason": "no rows were predicted positive at this threshold",
+    }
+    patch_opener(monkeypatch, response=FakeResponse(payload))
+
+    summary = make_client(admin_token=ADMIN_TOKEN).performance_summary()
+
+    assert summary.overall is not None
+    assert summary.overall.precision.defined is False
+    assert summary.overall.precision.value is None
+    assert "no rows were predicted positive" in (summary.overall.precision.reason or "")
+
+
+def test_performance_summary_preserves_the_unavailable_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_opener(
+        monkeypatch,
+        response=FakeResponse(
+            {"available": False, "reason": "No performance report is available.", "report": None}
+        ),
+    )
+
+    summary = make_client(admin_token=ADMIN_TOKEN).performance_summary()
+
+    assert summary.available is False
+    assert summary.reason == "No performance report is available."
+    assert summary.overall is None
+    assert summary.model_versions == ()
+    assert summary.segments == ()
+    assert summary.raw_report is None
+
+
+def test_performance_summary_rejects_an_undefined_metric_with_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = performance_payload()
+    report = payload["report"]
+    assert isinstance(report, dict)
+    overall = report["overall"]
+    assert isinstance(overall, dict)
+    overall["recall"] = {
+        "value": 0.5,
+        "defined": False,
+        "reason": "no actual positives in this group",
+    }
+    patch_opener(monkeypatch, response=FakeResponse(payload))
+
+    with pytest.raises(ApiResponseError, match="undefined but carries a value"):
+        make_client(admin_token=ADMIN_TOKEN).performance_summary()
 
 
 def test_history_rejects_an_invalid_page_size(monkeypatch: pytest.MonkeyPatch) -> None:

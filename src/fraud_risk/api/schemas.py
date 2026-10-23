@@ -132,6 +132,31 @@ class PredictionHistoryResponse(BaseModel):
     offset: int = Field(ge=0)
 
 
+class MonitoringSummaryResponse(BaseModel):
+    """The latest persisted monitoring report, or an explicit unavailable state.
+
+    ``report`` is the complete machine-readable JSON object produced by the monitoring run.
+    The API deliberately does not flatten it into a dashboard-only model: an operator can
+    retrieve the same aggregate record that was written to disk.
+    """
+
+    available: bool
+    reason: str | None = None
+    report: dict[str, Any] | None = None
+
+
+class PerformanceSummaryResponse(BaseModel):
+    """The latest persisted delayed-label performance report, or an explicit unavailable state.
+
+    ``report`` is the complete aggregate JSON object produced by the performance workflow. It
+    contains no feature row, transaction identifier or raw label.
+    """
+
+    available: bool
+    reason: str | None = None
+    report: dict[str, Any] | None = None
+
+
 class PredictionRequest(BaseModel):
     """One transaction submitted for scoring.
 
@@ -342,6 +367,7 @@ __all__ = [
     "ExplanationFeature",
     "HealthResponse",
     "ModelMetadataResponse",
+    "MonitoringSummaryResponse",
     "PredictionExplanation",
     "PredictionHistoryResponse",
     "PredictionRecordResponse",

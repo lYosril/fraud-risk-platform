@@ -16,6 +16,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -24,7 +25,14 @@ import pytest
 from fastapi import FastAPI
 
 from fraud_risk import __version__
-from fraud_risk.api.dependencies import get_inference_service, get_prediction_repository
+from fraud_risk.api.dependencies import (
+    MONITORING_RECORDER_STATE_KEY,
+    get_inference_service,
+    get_monitoring_recorder,
+    get_monitoring_repository,
+    get_performance_repository,
+    get_prediction_repository,
+)
 from fraud_risk.api.main import create_app
 from fraud_risk.config import Settings
 from fraud_risk.db.models import Prediction, PredictionDecision, ReviewStatus
@@ -235,6 +243,43 @@ class FakePredictionRepository:
         return record
 
 
+class FakeMonitoringRepository:
+    """Return one persisted report shape without a database."""
+
+    def __init__(self, report: Any | None = None) -> None:
+        self.report = report
+
+    def latest_report(self) -> Any | None:
+        return self.report
+
+
+class FakePerformanceRepository:
+    """Return one persisted performance report without a database."""
+
+    def __init__(self, report: Any | None = None) -> None:
+        self.report = report
+
+    def latest_report(self) -> Any | None:
+        return self.report
+
+
+class FakeMonitoringRecorder:
+    """Capture validation-failure counts instead of writing PostgreSQL rows."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.enabled = True
+
+    def record_validation_failures(
+        self,
+        *,
+        endpoint: str,
+        reason_code: str,
+        count: int = 1,
+    ) -> None:
+        self.calls.append({"endpoint": endpoint, "reason_code": reason_code, "count": count})
+
+
 def make_stored_prediction(
     *,
     prediction_id: UUID | None = None,
@@ -263,8 +308,12 @@ def make_app(
     *,
     service: StubInferenceService | None = None,
     repository: FakePredictionRepository | None = None,
+    monitoring_repository: FakeMonitoringRepository | None = None,
+    performance_repository: FakePerformanceRepository | None = None,
+    monitoring_recorder: FakeMonitoringRecorder | None = None,
     **settings_overrides: Any,
 ) -> FastAPI:
+    settings_overrides.setdefault("monitoring_capture_validation_failures", False)
     settings = Settings(  # type: ignore[call-arg]  # `_env_file` is runtime-only
         _env_file=None,
         **settings_overrides,
@@ -274,6 +323,19 @@ def make_app(
         app.dependency_overrides[get_inference_service] = lambda: service
     resolved_repository = repository if repository is not None else FakePredictionRepository()
     app.dependency_overrides[get_prediction_repository] = lambda: resolved_repository
+    resolved_monitoring = (
+        monitoring_repository if monitoring_repository is not None else FakeMonitoringRepository()
+    )
+    app.dependency_overrides[get_monitoring_repository] = lambda: resolved_monitoring
+    resolved_performance = (
+        performance_repository
+        if performance_repository is not None
+        else FakePerformanceRepository()
+    )
+    app.dependency_overrides[get_performance_repository] = lambda: resolved_performance
+    if monitoring_recorder is not None:
+        setattr(app.state, MONITORING_RECORDER_STATE_KEY, monitoring_recorder)
+        app.dependency_overrides[get_monitoring_recorder] = lambda: monitoring_recorder
     return app
 
 
@@ -425,6 +487,8 @@ def test_admin_routes_fail_closed_when_the_token_is_not_configured() -> None:
         ("GET", "/api/v1/model"),
         ("GET", "/api/v1/predictions"),
         ("GET", "/api/v1/predictions/summary"),
+        ("GET", "/api/v1/monitoring/summary"),
+        ("GET", "/api/v1/performance/summary"),
         ("GET", f"/api/v1/predictions/{prediction_id}"),
         ("PATCH", f"/api/v1/predictions/{prediction_id}/review"),
     ):
@@ -742,6 +806,127 @@ def test_prediction_summary_returns_aggregate_counts() -> None:
     assert [item["count"] for item in body["risk_bins"]].count(1) == 3
     assert "feature_snapshot" not in response.text
     assert "V1" not in response.text
+
+
+def test_monitoring_summary_returns_an_explicit_unavailable_state() -> None:
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/monitoring/summary",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is False
+    assert body["report"] is None
+    assert "No monitoring report" in body["reason"]
+
+
+def test_monitoring_summary_returns_the_persisted_report() -> None:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "report_id": str(uuid4()),
+        "summary": {"status": "ok"},
+    }
+    repository = FakeMonitoringRepository(SimpleNamespace(payload=payload))
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        monitoring_repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/monitoring/summary",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["reason"] is None
+    assert body["report"] == payload
+
+
+def test_performance_summary_returns_an_explicit_unavailable_state() -> None:
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/performance/summary",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is False
+    assert body["report"] is None
+    assert "No performance report" in body["reason"]
+
+
+def test_performance_summary_returns_the_persisted_report() -> None:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "report_id": str(uuid4()),
+        "summary": {"status": "ok", "row_count": 2},
+        "overall": {"pr_auc": {"value": 0.5, "defined": True, "reason": None}},
+    }
+    repository = FakePerformanceRepository(SimpleNamespace(payload=payload))
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        performance_repository=repository,
+        api_admin_token=ADMIN_TOKEN,
+    )
+
+    response = request(
+        app,
+        "GET",
+        "/api/v1/performance/summary",
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["reason"] is None
+    assert body["report"] == payload
+
+
+def test_invalid_prediction_is_counted_without_echoing_the_payload() -> None:
+    recorder = FakeMonitoringRecorder()
+    app = make_app(
+        service=StubInferenceService(model=make_model()),
+        monitoring_recorder=recorder,
+    )
+
+    response = request(
+        app,
+        "POST",
+        "/api/v1/predict",
+        json={"transaction_id": "", "amount": -1.0, "features": {}},
+    )
+
+    assert response.status_code == 422
+    assert recorder.calls == [
+        {
+            "endpoint": "/api/v1/predict",
+            "reason_code": "request_validation",
+            "count": 1,
+        }
+    ]
+    assert "-1.0" not in response.text
+    assert '"input"' not in response.text
 
 
 def test_prediction_history_routes_map_storage_failures_to_safe_503s() -> None:
@@ -1154,7 +1339,8 @@ def test_batch_prediction_scores_every_item_and_returns_model_identity() -> None
 def test_batch_returns_per_item_errors_without_aborting_the_batch() -> None:
     service = FeatureCheckingStub(model=make_model())
     repository = FakePredictionRepository()
-    app = make_app(service=service, repository=repository)
+    recorder = FakeMonitoringRecorder()
+    app = make_app(service=service, repository=repository, monitoring_recorder=recorder)
     invalid_label = {**prediction_payload("txn-label"), "is_fraud": 0}
     invalid_numeric = {
         "transaction_id": "txn-numeric",
@@ -1203,6 +1389,13 @@ def test_batch_returns_per_item_errors_without_aborting_the_batch() -> None:
     assert body["results"][4]["prediction"] == expected_prediction("txn-2")
     assert service.predict_calls == 2
     assert [row.transaction_id for row in repository.rows] == ["txn-1", "txn-2"]
+    assert recorder.calls == [
+        {
+            "endpoint": "/api/v1/predict/batch",
+            "reason_code": "batch_item_validation",
+            "count": 3,
+        }
+    ]
 
 
 def test_batch_rejects_an_empty_items_list() -> None:
@@ -1399,6 +1592,8 @@ def test_local_openapi_covers_every_versioned_endpoint() -> None:
         "/api/v1/predict/batch",
         "/api/v1/predictions",
         "/api/v1/predictions/summary",
+        "/api/v1/monitoring/summary",
+        "/api/v1/performance/summary",
         "/api/v1/predictions/{prediction_id}",
         "/api/v1/predictions/{prediction_id}/review",
     }
@@ -1409,6 +1604,8 @@ def test_local_openapi_covers_every_versioned_endpoint() -> None:
     assert "feature_snapshot" not in components["PredictionRecordResponse"]["properties"]
     assert "review_status" in components["ReviewUpdateRequest"]["properties"]
     assert "risk_bins" in components["PredictionSummaryResponse"]["properties"]
+    assert "available" in components["MonitoringSummaryResponse"]["properties"]
+    assert "report" in components["MonitoringSummaryResponse"]["properties"]
     assert "items" in components["PredictionHistoryResponse"]["properties"]
     assert {"index", "transaction_id", "status", "prediction", "error"} <= set(
         components["BatchPredictionItemResult"]["properties"]

@@ -6,12 +6,20 @@ comparison, frozen final-evaluation path and one real MLflow-tracked run, but st
 two-run history, stratified CV and the reliability/Brier comparison. M5 is in progress: the
 bundle contract, XGBoost SHAP layer and reusable inference service are implemented; registry
 alias resolution and the promotion gate are not. M6 is partially implemented: the versioned
-health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review
-routes, per-item batch errors, request/batch limits, CORS policy, safe error mapping, prediction
-persistence and admin bearer-token auth are in place, while request-id propagation and feedback
-capture remain open. M2 is partially implemented (predictions table, migration and repository;
-feedback/drift tables open). M7 is partially implemented (overview, scoring, filtered history,
-explanation and analyst-review views; drift history open). M8–M9 are not started.**
+health/readiness/model-metadata/single-prediction/batch-prediction/history-list/summary/review/
+monitoring-summary/performance-summary routes, per-item batch errors, request/batch limits, CORS
+policy, safe error mapping, prediction persistence and admin bearer-token auth are in place,
+while request-id propagation and feedback capture remain open. M2 is partially implemented
+(predictions, monitoring_events, drift_reports and performance_reports tables, migrations and
+repositories; feedback_labels open). M7 is partially implemented (overview, scoring, filtered
+history, explanation, analyst-review, monitoring-summary and performance-summary views;
+historical drift trends open). M8 is implemented for the signals that can be measured today:
+first-party PSI/KS feature and score drift, missing values, count-only validation failures,
+traffic and model-version usage, machine-readable report persistence, dashboard summaries, and
+repeatable delayed-label performance reports from a separately supplied scored evaluation
+extract. The drift report itself still marks performance unavailable because `feedback_labels`
+is not implemented; Evidently HTML rendering remains an optional extra and is not installed
+here. M9 is not started.**
 
 Test each milestone's exit criteria before starting the next one. No milestone is "done"
 because code exists â€” it is done when its exit criteria pass and the evidence is recorded.
@@ -87,9 +95,14 @@ because code exists â€” it is done when its exit criteria pass and the evid
 **Deliverables**
 
 - `db.base` (`DeclarativeBase` + naming convention for constraints), `db.models`
-  (`predictions`, `feedback_labels`, `drift_reports`), `db.session` (engine + session factory).
-- Alembic initialised; first migration creating the three tables, plus a downgrade path.
-- Repository functions for the write/read paths the API actually needs (no premature DAO layer).
+  (`predictions`, `monitoring_events`, `drift_reports`, `performance_reports`;
+  `feedback_labels` remains future), `db.session` (engine + session factory).
+- Alembic initialised; `0001_create_predictions` creates the prediction table,
+  `0002_create_monitoring` adds count-only monitoring events and aggregate drift reports, and
+  `0003_create_performance_reports` adds aggregate delayed-label performance reports, each with
+  a downgrade path.
+- Repository functions for the write/read paths the API actually needs (no premature DAO layer),
+  plus the small monitoring repository used by the scheduled report.
 
 **Exit criteria**
 
@@ -248,16 +261,19 @@ resolution, persistence and the promotion gate remain pending.
   access logging, exception mapping, and production removal of `/docs`/`/openapi.json`. Lifespan
   engine disposal is done; request-id propagation remains pending.
 - `api.schemas` â€” **done**: Pydantic v2 health, availability-only readiness,
-  model-metadata, single-prediction, batch-request/batch-result, persisted-record, review and
-  error models; validation rejects label fields, unknown fields and non-numeric feature values.
+  model-metadata, single-prediction, batch-request/batch-result, persisted-record, review,
+  monitoring-summary and error models; validation rejects label fields, unknown fields and
+  non-numeric feature values.
 - Routes under `Settings.api_prefix` â€” **done**: `GET /health` (liveness only),
   `GET /ready` (loads/validates the model; `200`/`503`, availability only), `GET /model`
   (admin-only identity and feature contract), `POST /predict` (one transaction),
   `POST /predict/batch` (bounded list with per-item success/error results),
   `GET /predictions` (admin-only bounded, filterable history page), `GET /predictions/summary`
   (admin-only aggregate counts and risk bins), `GET /predictions/{id}` and
-  `PATCH /predictions/{id}/review` (admin-only read-back/review). Review updates enforce a
-  pending-to-terminal transition and reject invalid updates with `409`.
+  `PATCH /predictions/{id}/review` (admin-only read-back/review),
+  `GET /monitoring/summary` (admin-only latest aggregate drift report) and
+  `GET /performance/summary` (admin-only latest aggregate delayed-label performance report).
+  Review updates enforce a pending-to-terminal transition and reject invalid updates with `409`.
   Model loading, scoring and repository calls run in Starlette's thread pool behind async
   handlers.
 - Persistence of every prediction; documented, non-leaking error responses. **Done**:
@@ -265,8 +281,8 @@ resolution, persistence and the promotion gate remain pending.
   back on failure, and read/review routes return the persisted record without exposing the
   opt-in feature snapshot.
 - Administrative authentication. **Done for the current scope**: `API_ADMIN_TOKEN` protects
-  model metadata, history and review with a constant-time bearer-token check. Protected routes
-  fail closed with `503` when the token is unset.
+  model metadata, history, review and monitoring summary with a constant-time bearer-token
+  check. Protected routes fail closed with `503` when the token is unset.
 - Resolve the inherited `starlette.testclient` / `httpx` deprecation first. **Resolved for the
   API suite** by testing through `httpx.ASGITransport` and dependency overrides, with no
   `TestClient` dependence and no deprecation warning.
@@ -301,17 +317,20 @@ rate limiting remain open, so the milestone is not complete.
 
 - `dashboard.app` reading from the API/DB (never importing model internals).
 - Views: traffic over time, score distribution with threshold markers, decision mix,
-  review-queue table, per-prediction explanation drill-down, drift history.
+  review-queue table, per-prediction explanation drill-down, latest monitoring summary and
+  historical drift trends.
 - Plotly charts; API base URL from settings.
 
 **Implemented so far:** `dashboard.api_client` (typed HTTP client, admin bearer token from
 `Settings`, filter query serialization, review PATCH, safe failure states),
 `dashboard.transformations` (counts, risk bins, frames, predicted-label vs analyst-outcome
-display), `dashboard.charts` (Plotly risk/decision/review/volume/explanation figures) and
-`dashboard.app` (overview, filtered history, analyst-review workflow, transaction scoring and
-explanation view). The API added `GET /predictions` filtering, `GET /predictions/summary` and
-terminal review transitions for real stored traffic. The per-prediction drill-down route/UI and
-drift history remain open; therefore M7 is not complete.
+display, monitoring feature/version tables and performance version/segment tables),
+`dashboard.charts` (Plotly risk/decision/review/volume/explanation figures) and `dashboard.app`
+(overview, filtered history, monitoring summary, performance summary, analyst-review workflow,
+transaction scoring and explanation view). The API added `GET /predictions` filtering,
+`GET /predictions/summary`, terminal review transitions, `GET /monitoring/summary` and
+`GET /performance/summary` for real stored traffic and aggregate reports. The per-prediction
+drill-down route/UI and historical drift-trend views remain open; therefore M7 is not complete.
 
 **Exit criteria**
 
@@ -323,22 +342,52 @@ drift history remain open; therefore M7 is not complete.
 
 ---
 
-## M8 â€” Monitoring
+## M8 â€” Monitoring â€” *implemented for available signals*
+
+**Status:** first-party PSI/KS feature and score drift, missing-value accounting, count-only
+validation failures, traffic/model-version usage, JSON report persistence and a dashboard
+monitoring tab are implemented. Delayed-label performance is available only through a separate
+workflow that validates an operator-supplied, scored and labeled evaluation extract; the drift
+report itself remains explicitly `unavailable` because the platform has no complete automatic
+labels table and an analyst-reviewed subset is non-random. Evidently HTML rendering remains an
+optional extra and is not installed in this environment.
 
 **Deliverables**
 
 - `monitoring.drift`: PSI (per feature, reference = training distribution), KS statistic,
-  score-distribution shift, volume/decision-mix tracking, and delayed-label performance.
-- Persist each run to `drift_reports`; configurable warning/alert thresholds.
-- Optional Evidently HTML report via the `monitoring` extra.
-- A documented runbook: what each alert means and what to check first.
+  score-distribution shift, missing-value rates and threshold classification.
+- `monitoring.reference`: a compact, tamper-evident training-reference profile containing
+  aggregate bins/quantiles only.
+- `monitoring.report`: machine-readable feature, score, missing, validation, traffic and
+  performance sections, with thresholds and caveats copied into every report.
+- `models.reference`: offline CLI that builds the reference from the training split and the
+  frozen bundle.
+- Persist each run to `drift_reports`; persist count-only validation failures to
+  `monitoring_events`; configurable warning/alert thresholds.
+- `monitoring.performance`: exact-schema validation of a scored, labeled extract, explicit
+  `{value, defined, reason}` metrics (precision, recall, F1, PR-AUC, ROC-AUC, confusion matrix,
+  false-positive rate), grouping by model version and day/week/month, provenance and late-label
+  caveats, JSON + `performance_reports` persistence.
+- Admin `GET /api/v1/monitoring/summary` and `GET /api/v1/performance/summary`, plus dashboard
+  monitoring and performance tabs.
+- Documented runbooks: what each drift alert means (`docs/MONITORING.md`) and how to produce and
+  interpret a delayed-label performance report (`docs/PERFORMANCE.md`).
 
 **Exit criteria**
 
 - Unit tests with hand-constructed distributions where the expected PSI is known analytically.
-- Injecting a shifted dataset produces a breach that is visible in `drift_reports` and in the
-  dashboard; injecting an unshifted one does not.
-- Thresholds are version-controlled, not hardcoded in the analysis script.
+- Shifted and unshifted synthetic windows produce different report statuses, and threshold
+  breaches are counted in `drift_reports` through the PostgreSQL integration test.
+- The dashboard path parses and renders the same persisted report; parser/transform tests cover
+  the unavailable and breached states. A live Streamlit visual check was not run.
+- Thresholds come from `Settings`, are validated at startup, version-controlled and copied into
+  the report, not hardcoded in the analysis script.
+- Performance metrics are pinned against a hand-computed confusion matrix, and every undefined
+  metric carries an explicit reason rather than zero. Schema mismatches (missing/extra columns,
+  `review_status`, raw `Class`, non-finite values, naive timestamps) are rejected.
+- A performance report round-trips through `performance_reports` in the PostgreSQL integration
+  suite, and the dashboard parser/transform tests cover defined, undefined and unavailable
+  states. The final held-out evaluation remains separate and is not read by this workflow.
 
 **Depends on:** M6, M7.
 

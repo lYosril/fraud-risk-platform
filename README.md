@@ -10,7 +10,7 @@ and what does not.
 
 ---
 
-## ⚠️ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability, reusable inference, the versioned FastAPI backend, PostgreSQL prediction persistence, an analyst review workflow and an interactive Streamlit dashboard complete; monitoring pending
+## ⚠️ Current status: foundation, data workflow, EDA, splitting, model comparison, frozen final evaluation, SHAP explainability, reusable inference, the versioned FastAPI backend, PostgreSQL prediction persistence, an analyst review workflow, drift monitoring, delayed-label performance reporting and an interactive Streamlit dashboard complete for the available signals
 
 **Milestone M0 (repository foundation) is complete, the Python 3.11 development environment
 is provisioned, the dataset workflow (acquisition, presence check and contract validation) is
@@ -19,10 +19,16 @@ final-evaluation, SHAP explanation, reusable inference-service, HTTP API and das
 are implemented. A winning model artifact, a frozen binary operating decision, an
 explainability report, a versioned health/readiness/model-metadata/single-prediction/
 batch-prediction API, PostgreSQL-backed prediction history, admin-protected review routes, a
-filtered analyst review workflow and a Streamlit overview/scoring dashboard exist locally. The
-dashboard shows real stored traffic, keeps the model's predicted label separate from the
-analyst's review outcome, and explicitly reports missing performance metrics rather than
-inventing them. Monitoring is not implemented yet.**
+filtered analyst review workflow, drift monitoring and a Streamlit overview/scoring/monitoring
+dashboard exist locally. The dashboard shows real stored traffic, keeps the model's predicted
+label separate from the analyst's review outcome, and explicitly reports missing performance
+metrics rather than inventing them. Monitoring covers feature/score drift when snapshots are
+enabled, validation-failure counts and traffic/version usage. A separate performance workflow
+evaluates an operator-supplied, scored and labeled extract, reporting precision, recall, F1,
+PR-AUC, ROC-AUC, the confusion matrix and the false-positive rate by model version and
+day/week/month, with every undefined metric carrying an explicit reason. Automatic label joins
+remain unavailable because `feedback_labels` is not implemented; analyst-reviewed rows are an
+incomplete, non-random subset and are not presented as overall model performance.**
 
 - **A real three-family comparison and a frozen final evaluation have been run** on the local
   reference dataset (logistic regression, random forest, XGBoost). Their actual metrics are
@@ -108,10 +114,10 @@ does not happen.
 | 2 | EDA & feature engineering | `fraud_risk/features/` | EDA **implemented** (+ `notebooks/eda.py`); shared transformer **implemented** and serialised inside the model bundle |
 | 3 | Training & evaluation | `fraud_risk/models/` (`splitting.py`, `training.py`, `evaluation.py`, `final_evaluation.py`, `explainability.py`) + `fraud_risk/tracking.py` | Splitting, three-family comparison, per-class metrics, cost/min-recall/alert-capacity policies, frozen final evaluation, XGBoost SHAP explanations and MLflow run tracking **implemented**; stratified CV and calibration comparison pending (M4) |
 | 4 | Artifacts & inference | `fraud_risk/models/registry.py`, `inference.py` | Reusable inference service **implemented** (lazy validated load, schema/order checks, score, optional SHAP); registry aliases **scaffolded** (M5) |
-| 5 | FastAPI application | `fraud_risk/api/` | Versioned health, readiness, model-metadata, single-prediction, batch-prediction, history-list/summary and review routes **implemented** with Pydantic contracts, per-item batch errors, request/batch limits, CORS configuration, safe error mapping, admin bearer-token auth and access logging; monitoring **pending** (M6) |
-| 6 | Database layer | `fraud_risk/db/` | Prediction ORM model, session/engine lifecycle, Alembic migration and repository read/write/summary paths **implemented**; feedback-label and drift-report tables pending (M2) |
-| 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Overview, risk distribution, decision/review charts, filtered history, transaction scoring, explanation view and an admin-only analyst review workflow **implemented** against the API; drift-history views pending (M7) |
-| 8 | Monitoring | `fraud_risk/monitoring/` | Scaffolded |
+| 5 | FastAPI application | `fraud_risk/api/` | Versioned health, readiness, model-metadata, single-prediction, batch-prediction, history-list/summary, review, monitoring-summary and performance-summary routes **implemented** with Pydantic contracts, per-item batch errors, request/batch limits, CORS configuration, safe error mapping, admin bearer-token auth and access logging; request IDs and feedback capture pending (M6) |
+| 6 | Database layer | `fraud_risk/db/` | Prediction, count-only monitoring-event, aggregate drift-report and aggregate performance-report ORM models, session/engine lifecycle, Alembic migrations and repository read/write/summary paths **implemented**; feedback-labels table pending (M2) |
+| 7 | Streamlit dashboard | `fraud_risk/dashboard/` | Overview, risk distribution, decision/review charts, filtered history, transaction scoring, explanation view, an admin-only analyst review workflow, a drift-monitoring summary and a delayed-label performance summary **implemented** against the API; historical drift-trend views pending (M7) |
+| 8 | Monitoring | `fraud_risk/monitoring/`, `fraud_risk/models/reference.py` | Feature/score PSI and KS drift, missing values, count-only validation failures, traffic/model-version usage, JSON + `drift_reports` persistence, admin summary and dashboard tab **implemented**; a separate performance workflow validates a supplied scored/labeled extract, computes PR-AUC/ROC-AUC/precision/recall/F1/FPR by version/period, persists `performance_reports`, and exposes an admin summary and dashboard tab. Automatic label joins remain unavailable until `feedback_labels` exists. Evidently HTML rendering remains an optional extra (M8) |
 | 9 | Tests, CI, containers | `tests/`, `.github/`, `docker-compose.yml` | Scaffolded |
 
 Full component responsibilities and the design rationale (including alternatives considered)
@@ -656,6 +662,8 @@ ReDoc and debug mode.
 | `POST /api/v1/predict/batch` | public | Scores a bounded list, returning one result or safe error per item |
 | `GET /api/v1/predictions` | admin | Lists a filtered, bounded page of persisted history. Query parameters: `created_from`, `created_to` (inclusive, timezone-aware), `min_risk_score`, `max_risk_score`, `decision`, `review_status`, `limit`, `offset`. Feature snapshots are never returned. |
 | `GET /api/v1/predictions/summary` | admin | Aggregate counts and fixed-width risk bins for the dashboard overview |
+| `GET /api/v1/monitoring/summary` | admin | Latest persisted aggregate drift report, or an explicit `available: false` state when none exists |
+| `GET /api/v1/performance/summary` | admin | Latest persisted aggregate delayed-label performance report, or an explicit `available: false` state when none exists |
 | `GET /api/v1/predictions/{id}` | admin | Reads one persisted prediction (never the feature snapshot) |
 | `PATCH /api/v1/predictions/{id}/review` | admin | Records `confirmed_fraud` or `confirmed_legitimate` for a pending prediction. Reviewed states are terminal; an invalid transition returns `409`. |
 
@@ -693,7 +701,8 @@ python -m uvicorn fraud_risk.api.main:app --host 127.0.0.1 --port 8000
 ```
 
 Set the dashboard's API URL and an administrative token. `API_ADMIN_TOKEN` enables the
-overview, recent history and model-feature form; the scoring endpoint itself stays public.
+overview, recent history, monitoring summary and model-feature form; the scoring endpoint
+itself stays public.
 Use a locally generated value of at least 16 characters and never commit it:
 
 **PowerShell**
@@ -731,12 +740,89 @@ What the dashboard shows:
 - **Score a transaction** — builds a form from the loaded bundle's exact feature order
   (`GET /api/v1/model`), calls `POST /api/v1/predict`, and displays probability, applied
   threshold, decision and the optional top-k SHAP explanation with a Plotly chart.
-- **Model performance** — explicitly unavailable. The platform stores predictions but does
-  not yet capture delayed feedback labels or expose an evaluation endpoint, so PR-AUC, recall
-  and similar metrics are not shown. No illustrative or synthetic metric is substituted.
+- **Performance** — latest aggregate delayed-label report from `GET /api/v1/performance/summary`:
+  PR-AUC (primary), ROC-AUC, precision, recall, F1, false-positive rate, row/positive counts,
+  threshold, label source and verification state, plus tables by model version and by
+  `(model version, day/week/month)`. Undefined metrics are shown as `undefined`, never as zero,
+  and the report's warnings/caveats are rendered verbatim. No raw evaluation row is displayed.
+- **Monitoring** — latest aggregate drift report from `GET /api/v1/monitoring/summary`:
+  overall/data-drift/data-quality/performance states, score PSI, feature table, validation
+  failure rate, model-version usage and the report's caveats. It says explicitly when the window
+  is empty, feature snapshots are absent or delayed-label performance cannot be measured.
 
 The review controls appear only when the dashboard has `API_ADMIN_TOKEN`; the API independently
 requires the same bearer token on every history and review request.
+
+### Running drift monitoring
+
+Monitoring has two steps: build the training reference once (or after a deliberate model/data
+change), then run the report on a schedule.
+
+```powershell
+python -m fraud_risk.models.reference `
+  --path data/raw/creditcard.csv `
+  --model-artifact artifacts/final_evaluation/frozen_model.joblib `
+  --output reports/monitoring/reference_profile.json
+
+python -m fraud_risk.monitoring run --window-hours 24
+```
+
+The reference command uses the training split only and writes aggregate quantile bins, a
+101-point sample, means and provenance; it never writes transaction rows. The run command reads
+at most `MONITORING_SAMPLE_LIMIT` newest predictions for distributions, keeps exact traffic
+counts, writes timestamped JSON plus `latest.json`, and persists one `drift_reports` row unless
+`--no-persist` is passed. Set `DATABASE_URL` (or `POSTGRES_*`) to the same database the API uses.
+
+What the report distinguishes:
+
+- **Data drift** — per-feature PSI/KS and score PSI/KS. Feature monitoring requires
+  `PERSIST_FEATURE_SNAPSHOT=true`; it is off by default.
+- **Data quality** — missing-value rates and count-only input-validation failures. Events store
+  endpoint and reason code, never the request body.
+- **Traffic** — exact prediction volume, binary decision mix, model-version usage and analyst
+  review coverage.
+- **Performance** — the drift report itself keeps this `unavailable` until complete delayed
+  labels exist. Analyst-reviewed outcomes are an incomplete, non-random subset and do not
+  support an overall PR-AUC, recall or accuracy claim. Use the separate performance workflow
+  below with a verified, scored evaluation extract when such labels are available.
+
+Default thresholds are configuration, not literals in the analysis code: PSI 0.10 warning /
+0.25 alert, KS 0.10/0.20, missing rate 1%/5%, validation-failure rate 2%/5%. They are starting
+operational bands, copied into every report; review them against real windows. The full runbook,
+PSI/KS definitions and alert triage steps are in **[`docs/MONITORING.md`](docs/MONITORING.md)**.
+
+### Running a delayed-label performance report
+
+Routine performance evaluation is deliberately separate from drift monitoring and from the
+one-time final test evaluation. It reads an operator-supplied CSV with **exactly** the model
+feature columns (`V1..V28`, `Amount`), the verified target `is_fraud`, the score served at
+prediction time `risk_score`, `model_version` and a timezone-aware `scored_at`. Extra columns
+are rejected, including `review_status` and the raw `Class` column: analyst review state is not
+confirmed ground truth, and scores are never recomputed with a later model.
+
+```powershell
+python -m fraud_risk.monitoring performance `
+  --path data/evaluation/labeled_extract.csv `
+  --threshold 0.5 `
+  --label-source verified_chargebacks `
+  --labels-verified `
+  --period month
+```
+
+`--threshold` is required and recorded with the report. `--period` groups by `day`, `week` or
+`month`; `--window-start`/`--window-end` optionally restrict the inclusive evaluation window.
+The command writes timestamped JSON plus `latest.json` under `PERFORMANCE_REPORT_DIR` and, unless
+`--no-persist` is passed, one `performance_reports` row. The admin route
+`GET /api/v1/performance/summary` and the dashboard Performance tab read the latest row.
+
+Each report records the dataset SHA-256, row count, model versions, segments, threshold, period,
+label source, `labels_verified` and metric definitions. Metrics are `{value, defined, reason}`
+objects: PR-AUC and ROC-AUC are undefined unless both classes exist; precision requires a
+predicted positive; recall an actual positive; F1 both precision and recall; and the
+false-positive rate an actual negative. A missing class or empty decision bucket therefore
+produces an explicit `null` with a reason, never a fabricated zero. Late labels, small segments
+and the non-random nature of analyst-reviewed subsets are documented in
+**[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)**.
 
 ### Predicted fraud vs confirmed fraud
 
@@ -785,9 +871,10 @@ Known limitations, stated plainly:
 **Current scope:** successful predictions are persisted, `GET /api/v1/predictions` and
 `GET /api/v1/predictions/summary` provide filtered admin-protected history pages and overview
 counts, `GET /api/v1/predictions/{id}` plus `PATCH /api/v1/predictions/{id}/review` provide
-read-back and terminal analyst-review transitions, and the Streamlit dashboard renders that
-real history, scores new transactions and records analyst outcomes. Feedback labels, drift views
-and monitoring remain later milestones.
+read-back and terminal analyst-review transitions, `GET /api/v1/monitoring/summary` returns the
+latest aggregate drift report, and the Streamlit dashboard renders that real history, scores new
+transactions, records analyst outcomes and shows monitoring state. Feedback labels and historical
+drift-trend views remain later milestones.
 
 ### Request and response examples
 
@@ -965,23 +1052,42 @@ network; the admin routes are separately protected by `API_ADMIN_TOKEN`.
     (including a missing artifact), admin bearer-token auth and fail-closed behaviour, model
     metadata, dependency-overridden single and batch prediction, persisted history without the
     feature snapshot, filtered/bounded newest-first history pages, aggregate summary/risk bins,
-    allowed and rejected review transitions, per-item batch errors, empty/oversized batches,
+    allowed and rejected review transitions, latest monitoring and performance summaries,
+    count-only validation failure recording, per-item batch errors, empty/oversized batches,
     request-body limits, validation and safe error mapping including a generic 500, CORS
-    allow/deny and admin preflight, production docs removal, factory laziness and a subprocess
-    proof that importing the app opens no network connection.
+    allow/deny and admin
+    preflight, production docs removal, factory laziness and a subprocess proof that importing
+    the app opens no network connection.
   - `tests/test_db.py` — the database contract: ORM shape and privacy defaults, repository
     commit/rollback policy for create/read/filtered-list/summary/review, terminal review-state
-    enforcement, request-scoped session rollback/close, and offline Alembic rendering.
+    enforcement, request-scoped session rollback/close, monitoring/performance table
+    shapes/constraints and offline Alembic rendering.
     `tests/test_db_integration.py` performs the real PostgreSQL round-trip, filtered history,
-    summary and schema checks when `TEST_DATABASE_URL` is set.
+    summary, monitoring event/report, performance report and schema checks when
+    `TEST_DATABASE_URL` is set.
   - `tests/test_dashboard_client.py` — URL construction, history-filter serialization, bearer
-    handling without token leakage, review PATCH calls, `409` conflict mapping, timeouts/
-    unreachable APIs, safe HTTP errors, malformed JSON, response-contract validation,
+    handling without token leakage, review PATCH calls, `409` conflict mapping, monitoring and
+    performance summary parsing/unavailable states, undefined metric preservation,
+    timeouts/unreachable APIs, safe HTTP errors, malformed JSON, response-contract validation,
     feature-order preservation and local input rejection.
   - `tests/test_dashboard_transforms.py` — empty-state handling, flag rate, decision/review
     buckets, risk-band labels, predicted-label vs analyst-outcome display tables, hourly volume,
-    UTC timestamps and explanation ordering.
-  - `tests/test_smoke_imports.py` â€” the environment smoke test: every package the
+    monitoring feature/version tables, performance version/segment tables, undefined metrics and
+    status labels, UTC timestamps and explanation ordering.
+  - `tests/test_monitoring.py` — drift and reporting: PSI against identical and analytically
+    known distributions, reference-bin reuse and shifted distribution detection, the KS
+    half-shift case, missing-value accounting, reference-profile round-trip/tamper detection,
+    unshifted/shifted/empty windows, absent snapshots, truncated samples, validation-failure
+    rates, the explicit unavailable-performance state and JSON report writing.
+  - `tests/test_performance.py` — delayed-label performance: hand-computed precision/recall/F1/
+    PR-AUC/ROC-AUC/FPR and confusion matrix, threshold effects, missing-class and zero-denominator
+    undefined states with reasons, exact-schema rejection (missing/extra columns, `review_status`,
+    raw `Class`, NaN/non-finite values, invalid labels/scores, naive timestamps, blank versions,
+    duplicates), version/period grouping, inclusive window filtering, provenance and
+    unverified-label warnings, JSON writing and the no-persist CLI path.
+  - `tests/test_models_reference.py` — the offline reference CLI: deterministic bounded sampling,
+    training-split/model-pipeline orchestration (with fakes) and invalid-bound rejection.
+  - `tests/test_smoke_imports.py` — the environment smoke test: every package the
     architecture requires is *declared*, *installed inside its declared version range*, and
     *importable*, including the specific classes each layer is built on
     (`ColumnTransformer`, `XGBClassifier`, `TreeExplainer`, `DeclarativeBase`,
@@ -998,14 +1104,15 @@ Reproduce everything with the commands above.
 
 | Check | Windows 3.11.9 (current) | Linux 3.11.17 (previous state) |
 |-------|--------------------------|-------------------------------|
-| `ruff format --check .` | 67 files already formatted | 38 files already formatted |
+| `ruff format --check .` | 83 files already formatted | 38 files already formatted |
 | `ruff check .` | All checks passed | All checks passed |
-| `mypy` (`strict = true`) | Success, 59 source files | Success, 32 source files |
-| `pytest -q` | **430 passed** (4 third-party warnings, 42.13 s) | **138 passed** (same warnings) |
+| `mypy` (`strict = true`) | Success, 71 source files | Success, 32 source files |
+| `pytest -q` | **512 passed** (4 third-party warnings, 68.53 s) | **138 passed** (same warnings) |
 
-The `pytest -q` row includes the two PostgreSQL integration tests; without `TEST_DATABASE_URL`
-they are skipped. The suite was run against this worktree; it is not a claim that a deployment
-or its infrastructure is secure.
+The `pytest -q` row includes five PostgreSQL integration tests against the dedicated Compose
+database (`fraud_test_monitoring`) with `TEST_DATABASE_URL` set; the existing `fraud` database
+was not used for test writes. Without `TEST_DATABASE_URL` those five are skipped. The suite was
+run against this worktree; it is not a claim that a deployment or its infrastructure is secure.
 
 Tool versions: ruff 0.17.1, mypy 2.4.0, pytest 9.1.1, pandas-stubs 2.3.3.260113, pip 26.2.1.
 The container run used a clean venv and `pip install -e ".[dev]"`.
@@ -1034,6 +1141,30 @@ The same command with `--strategy stratified` produced 170,884 / 56,961 / 56,962
 295 / 98 / 99 frauds (0.1726% / 0.1720% / 0.1738%). Both records are in the git-ignored
 `reports/splits/` (2.5 KB each, no feature values). The shared preprocessor was fitted on the
 training subset and transformed the validation subset to a 56,961 x 29 matrix.
+
+**Monitoring reference also built on the real training split and frozen model.** The command
+`python -m fraud_risk.models.reference` (temporal split, seed 42, every training row) wrote a
+git-ignored profile with 29 features and 170,888 scored rows. Its reference ID is
+`6b9a4c145656ef495cb05e6702584f8c7cf09642a52fe1da72a1846284e38b5e`; the source bundle SHA-256
+is `e43c600bf6560e6334e3f5efc2667b5d19d5f14dd0e71cfd55bba252518743c9`, matching the frozen final
+model. The reference score mean is `0.0021255734057661997`. A subsequent
+`python -m fraud_risk.monitoring run --window-hours 24` ran against the local `fraud` database
+and persisted report `4efd30eb-c920-4316-8e84-aa6abc9419a7`. That database held **0** predictions
+in the window, so the actual report status was `unavailable` with `prediction_count=0` and
+`validation_failure_count=0`; no drift or performance metric was fabricated for it. The report
+correctly names the empty window and unavailable feature/snapshot sections. An in-process
+`GET /api/v1/monitoring/summary` request against that persisted row returned HTTP `200`,
+`available=true`, `status=unavailable`, `prediction_count=0`. The JSON files are git-ignored;
+the migration had to be applied to the local database first, and the integration suite used a
+separate fresh database as described below.
+
+**Delayed-label performance reporting has only been exercised on synthetic fixtures.** No real
+scored, labeled evaluation extract was supplied, so this repository makes no claim about the
+production model's PR-AUC, recall or any other performance metric from this workflow. The unit
+suite covers hand-computed metrics, undefined states, schema rejection, grouping and JSON
+writing; the PostgreSQL integration suite round-trips an aggregate report through
+`performance_reports`; and the API/dashboard tests cover the unavailable and persisted states.
+The frozen final-evaluation metrics below are separate and were not produced by this workflow.
 
 **Three-family comparison also run on the reference dataset** (never committed).
 `python -m fraud_risk.models.training` (temporal split, seed 42, 114 s wall clock on all
@@ -1170,7 +1301,7 @@ Recorded honestly rather than implied to work:
 
 | Check | Why it cannot be run yet |
 |-------|--------------------------|
-| `pytest -m integration` without `TEST_DATABASE_URL` | The two PostgreSQL tests skip by design; run Compose PostgreSQL and set the URL to execute them (done in the verification record above). |
+| `pytest -m integration` without `TEST_DATABASE_URL` | The five PostgreSQL tests skip by design; run Compose PostgreSQL and set the URL to execute them (done in the verification record above). |
 | `docker compose up` application stack | Only PostgreSQL is defined; app services arrive in M9. |
 | CI being green | `.github/workflows/ci.yml` has never run on GitHub. |
 | General model quality or production readiness | One temporal split has been scored; the test split is no longer a pristine holdout, there is only one real MLflow run (not a two-run history) and no reliability/Brier comparison, and the cost weights are provisional assumptions. The reported numbers describe this run, not a financial decision system. |

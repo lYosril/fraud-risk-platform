@@ -19,7 +19,11 @@ import pandas as pd
 
 from fraud_risk.dashboard.api_client import (
     Explanation,
+    MonitoringSummary,
     OverviewSummary,
+    PerformanceMetric,
+    PerformanceMetrics,
+    PerformanceSummary,
     PredictionRecord,
     RiskBin,
 )
@@ -34,6 +38,54 @@ RECORD_COLUMNS = (
     "decision",
     "review_status",
 )
+MONITORING_FEATURE_COLUMNS = (
+    "feature",
+    "status",
+    "psi",
+    "ks_statistic",
+    "missing_rate",
+    "sample_count",
+)
+MONITORING_VERSION_COLUMNS = (
+    "model_version",
+    "total",
+    "fraud",
+    "legitimate",
+    "share",
+)
+PERFORMANCE_STATUS_LABELS = {
+    "ok": "Complete",
+    "partial": "Partial / provisional",
+}
+PERFORMANCE_VERSION_COLUMNS = (
+    "model_version",
+    "rows",
+    "positives",
+    "precision",
+    "recall",
+    "f1",
+    "pr_auc",
+    "roc_auc",
+    "false_positive_rate",
+)
+PERFORMANCE_SEGMENT_COLUMNS = (
+    "model_version",
+    "period",
+    "rows",
+    "positives",
+    "precision",
+    "recall",
+    "f1",
+    "pr_auc",
+    "roc_auc",
+    "false_positive_rate",
+)
+MONITORING_STATUS_LABELS = {
+    "ok": "OK",
+    "warning": "Warning",
+    "alert": "Alert",
+    "unavailable": "Unavailable",
+}
 RISK_FRAME_COLUMNS = ("label", "lower", "upper", "midpoint", "width", "count")
 REVIEW_TABLE_COLUMNS = (
     "prediction_id",
@@ -173,6 +225,93 @@ def volume_frame(records: Sequence[PredictionRecord]) -> pd.DataFrame:
     return aggregated
 
 
+def monitoring_status_label(value: str | None) -> str:
+    """Name a drift state without implying that drift is performance decay."""
+    if value is None:
+        return "Unavailable"
+    return MONITORING_STATUS_LABELS.get(value, value)
+
+
+def monitoring_feature_frame(summary: MonitoringSummary) -> pd.DataFrame:
+    """Return per-feature drift statistics in report order."""
+    rows = [
+        {
+            "feature": item.feature,
+            "status": monitoring_status_label(item.status),
+            "psi": item.psi,
+            "ks_statistic": item.ks_statistic,
+            "missing_rate": format_percentage(item.missing_rate),
+            "sample_count": item.sample_count,
+        }
+        for item in summary.features
+    ]
+    return pd.DataFrame(rows, columns=list(MONITORING_FEATURE_COLUMNS))
+
+
+def monitoring_version_frame(summary: MonitoringSummary) -> pd.DataFrame:
+    """Return model-version usage as a display table with a percentage share."""
+    rows = [
+        {
+            "model_version": item.model_version,
+            "total": item.total,
+            "fraud": item.fraud,
+            "legitimate": item.legitimate,
+            "share": format_percentage(item.share),
+        }
+        for item in summary.model_versions
+    ]
+    return pd.DataFrame(rows, columns=list(MONITORING_VERSION_COLUMNS))
+
+
+def performance_status_label(value: str | None) -> str:
+    """Name the report completeness state without implying a model verdict."""
+    if value is None:
+        return "Unavailable"
+    return PERFORMANCE_STATUS_LABELS.get(value, value)
+
+
+def performance_metric_text(metric: PerformanceMetric | None) -> str:
+    """Format a performance metric, preserving an explicit undefined state."""
+    if metric is None or not metric.defined or metric.value is None:
+        return "undefined"
+    return format_percentage(metric.value)
+
+
+def _performance_row(metrics: PerformanceMetrics) -> dict[str, Any]:
+    return {
+        "rows": metrics.rows,
+        "positives": metrics.positives,
+        "precision": performance_metric_text(metrics.precision),
+        "recall": performance_metric_text(metrics.recall),
+        "f1": performance_metric_text(metrics.f1),
+        "pr_auc": performance_metric_text(metrics.pr_auc),
+        "roc_auc": performance_metric_text(metrics.roc_auc),
+        "false_positive_rate": performance_metric_text(metrics.false_positive_rate),
+    }
+
+
+def performance_version_frame(summary: PerformanceSummary) -> pd.DataFrame:
+    """Return per-model-version aggregate metrics in report order."""
+    rows = [
+        {"model_version": item.model_version, **_performance_row(item.metrics)}
+        for item in summary.model_versions
+    ]
+    return pd.DataFrame(rows, columns=list(PERFORMANCE_VERSION_COLUMNS))
+
+
+def performance_segment_frame(summary: PerformanceSummary) -> pd.DataFrame:
+    """Return per-(version, period) metrics in report order."""
+    rows = [
+        {
+            "model_version": item.model_version,
+            "period": item.period_label,
+            **_performance_row(item.metrics),
+        }
+        for item in summary.segments
+    ]
+    return pd.DataFrame(rows, columns=list(PERFORMANCE_SEGMENT_COLUMNS))
+
+
 def explanation_frame(explanation: Explanation) -> pd.DataFrame:
     """Return contributions sorted so the strongest effect is plotted at the top."""
     rows = [
@@ -196,6 +335,12 @@ def explanation_frame(explanation: Explanation) -> pd.DataFrame:
 __all__ = [
     "DECISION_LABELS",
     "EXPLANATION_COLUMNS",
+    "MONITORING_FEATURE_COLUMNS",
+    "MONITORING_STATUS_LABELS",
+    "MONITORING_VERSION_COLUMNS",
+    "PERFORMANCE_SEGMENT_COLUMNS",
+    "PERFORMANCE_STATUS_LABELS",
+    "PERFORMANCE_VERSION_COLUMNS",
     "RECORD_COLUMNS",
     "REVIEW_STATUS_LABELS",
     "REVIEW_TABLE_COLUMNS",
@@ -205,6 +350,13 @@ __all__ = [
     "explanation_frame",
     "format_percentage",
     "fraud_rate",
+    "monitoring_feature_frame",
+    "monitoring_status_label",
+    "monitoring_version_frame",
+    "performance_metric_text",
+    "performance_segment_frame",
+    "performance_status_label",
+    "performance_version_frame",
     "recent_predictions_frame",
     "review_counts",
     "review_status_label",
